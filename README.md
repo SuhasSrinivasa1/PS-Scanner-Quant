@@ -1,8 +1,10 @@
-# PS Scanner Quant v6.8.2
+# PS Scanner Quant v6.8.3
 
-v6.8.2 is the clean public-repository baseline. It carries forward the production-validated v6.8.1 bounded performance fix and adds indexed, execution-critical-first health snapshots plus Mac runtime compatibility hardening. No trading threshold, risk gate, frozen-book identity, evidence rule, or Static-IP scope is loosened.
+v6.8.3 is the current public-repository release. It carries forward the v6.8.2 clean baseline and fixes the installer post-launch version gate that incorrectly rolled back a healthy v6.8.2 service. It carries forward the production-validated v6.8.1 bounded performance fix and adds indexed, execution-critical-first health snapshots plus Mac runtime compatibility hardening. No trading threshold, risk gate, frozen-book identity, evidence rule, or Static-IP scope is loosened.
 
 See:
+- `RELEASE_v6.8.3.md`
+- `ARCHITECTURE_AUDIT_v6.8.3.md`
 - `RELEASE_v6.8.2.md`
 - `ARCHITECTURE_AUDIT_v6.8.2.md`
 
