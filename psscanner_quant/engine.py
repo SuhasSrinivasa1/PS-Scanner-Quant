@@ -760,6 +760,11 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
     # V627 compatibility/invariant: fabric_symbol_context delegates to sector_context_cached
     # and news_context(..., allow_refresh=False); scanners never synchronously refresh them.
     prices = live_prices(syms,allow_network=False,max_age_seconds=180)
+    benchmark_df=history("NIFTY",interval,allow_network=False)
+    benchmark_series=benchmark_df["close"] if len(benchmark_df)>=25 and "close" in benchmark_df else None
+    daily_benchmark_df=history("NIFTY","1day",allow_network=False) if book=="INTRADAY" else benchmark_df
+    daily_benchmark_series=daily_benchmark_df["close"] if len(daily_benchmark_df)>=25 and "close" in daily_benchmark_df else None
+    stats["benchmark_relative_strength"]={"symbol":"NIFTY","interval":interval,"ready":benchmark_series is not None,"rows":len(benchmark_df)}
     regime_state = get_state("last_regime",{}) or {"regime":"WARMING","breadth_up_pct":0.0,"breadth_down_pct":0.0,"trend_vote":0.0,"stale":True}
     regime=(regime_state.get("regime") or "WARMING")
     global_ctx=get_state("global_context",{}) or {"risk_state":"UNKNOWN","moves_pct":{},"stale":True,"source":"BACKGROUND_CONTEXT_NOT_READY"}
@@ -820,11 +825,11 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
                 stats["limited_history_samples"].append({"symbol":sym,"rows":len(df),"status":"PARSED_HISTORY_SHORT"})
             continue
         stats["history_ready"]+=1
-        f = latest_features(df)
+        f = latest_features(df,benchmark=benchmark_series)
         if book == 'INTRADAY':
             daily=history(sym,'1day',allow_network=False)
             if len(daily)>=30:
-                hf=latest_features(daily);f['higher_tf_trend']=hf.get('trend',0);f['higher_ret20']=hf.get('ret20',0)
+                hf=latest_features(daily,benchmark=daily_benchmark_series);f['higher_tf_trend']=hf.get('trend',0);f['higher_ret20']=hf.get('ret20',0)
         else:
             f['higher_tf_trend']=f.get('trend',0);f['higher_ret20']=f.get('ret20',0)
         px = float(prices.get(sym) or f.get("close") or 0);f['close']=px
@@ -1496,6 +1501,16 @@ class Engine:
         settings=load_settings()
         warm_daily_history(int(settings.get("daily_history_warm_batch",20)))
 
+    def _benchmark_history(self):
+        # Dedicated benchmark producer. Scanners consume only the cached NIFTY history,
+        # so benchmark-relative strength never adds synchronous broker traffic to a scan.
+        daily=history("NIFTY","1day",allow_network=True)
+        intra=history("NIFTY","5minute",allow_network=True)
+        out={"at":now_iso(),"symbol":"NIFTY","daily_rows":len(daily),"intraday_rows":len(intra),
+             "policy":"BACKGROUND_NIFTY_BENCHMARK_HISTORY_SCANNERS_CACHE_ONLY"}
+        set_state("benchmark_history_status",out)
+        fabric_publish("benchmark_history",source="GROWW_NIFTY_HISTORY",consumers=("INTRADAY","WEEKLY","MONTHLY","ETF","ALGORITHM"),payload=out,network_fetch=True,symbols=1,ttl_seconds=600)
+
     def _set_worker_stage(self,name,stage):
         state=dict(self.worker_runtime.get(name) or {})
         if state.get("state")=="RUNNING":
@@ -1566,8 +1581,9 @@ class Engine:
         fabric_publish("events",source="POINT_IN_TIME_EARNINGS_AND_OFFICIAL_CALENDAR",consumers=("INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","ALGORITHM"),payload=out,network_fetch=bool(attempted),symbols=attempted)
 
     def _institutional_refresh(self):
-        out=institutional_refresh(force=True)
-        fabric_publish("institutional",source="NSE_FII_DII_LARGE_DEALS_PLUS_LOCAL_ACCUMULATION",consumers=("INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","GLOBAL_INDIA","ALGORITHM","STRATEGY_LAB"),payload={"status":out.get("status"),"large_deal_count":out.get("large_deal_count"),"errors":out.get("errors")},network_fetch=True,symbols=out.get("large_deal_count"))
+        priority=fabric_priority_symbols(24)
+        out=institutional_refresh(force=True,symbols=priority)
+        fabric_publish("institutional",source="NSE_DISCLOSURES_DELIVERY_FII_DII_LARGE_DEALS_PLUS_GROWW_FNO",consumers=("INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","GLOBAL_INDIA","ALGORITHM","STRATEGY_LAB"),payload={"status":out.get("status"),"large_deal_count":out.get("large_deal_count"),"delivery_count":((out.get("delivery") or {}).get("count")),"derivatives_ready":((out.get("derivatives_status") or {}).get("ready")),"errors":out.get("errors")},network_fetch=True,symbols=len(priority))
 
     def _algorithm_refresh(self):
         from .trading_algorithm import refresh as refresh_algorithm
@@ -1647,6 +1663,7 @@ class Engine:
             # burst. Their intervals are unchanged; only startup phases are staggered.
             ("maintenance",float(settings.get("maintenance_worker_interval_seconds",90)),self._maintenance,45),
             ("daily_history",float(settings.get("daily_history_worker_interval_seconds",90)),self._daily_history,60),
+            ("benchmark_history",float(settings.get("benchmark_history_worker_interval_seconds",300)),self._benchmark_history,75),
             ("weekly",float(settings.get("horizon_worker_interval_seconds",300)),lambda:run_single_horizon_cycle("WEEKLY"),10),
             ("monthly",float(settings.get("horizon_worker_interval_seconds",300)),lambda:run_single_horizon_cycle("MONTHLY"),12),
             ("circuit",float(settings.get("circuit_worker_interval_seconds",120)),self._circuit,14),
