@@ -63,6 +63,7 @@ _DEFAULTS: Dict[str, Any] = {
     "news_worker_interval_seconds": 120,
     "event_worker_interval_seconds": 300,
     "institutional_worker_interval_seconds": 300,
+    "benchmark_history_worker_interval_seconds": 300,
     "algorithm_worker_interval_seconds": 300,
     "horizon_worker_interval_seconds": 300,
     "horizon_recovery_batch_size": 120,

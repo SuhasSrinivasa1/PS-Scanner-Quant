@@ -37,8 +37,8 @@ def _status(cond:Optional[bool], warn:bool=False)->str:
     return 'FAIL'
 
 
-def _filter(rank:int,name:str,group:str,status:str,detail:str='',hard:bool=False,value:Any=None)->Dict[str,Any]:
-    return {'rank':rank,'name':name,'group':group,'status':status,'hard_fail':bool(hard and status=='FAIL'),'detail':detail,'value':value}
+def _filter(rank:int,name:str,group:str,status:str,detail:str='',hard:bool=False,value:Any=None,score_enabled:bool=True)->Dict[str,Any]:
+    return {'rank':rank,'name':name,'group':group,'status':status,'hard_fail':bool(hard and status=='FAIL'),'detail':detail,'value':value,'score_enabled':bool(score_enabled)}
 
 
 def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamentals:Optional[Dict[str,Any]],
@@ -53,16 +53,33 @@ def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamen
     strategy_ids=strategy_ids or []; suspended=set(suspended_strategy_ids or [])
     f=features; filters=[]
     catalog={int(x['rank']):x for x in filter_catalog()}
-    def add(rank:int,status:str,detail:str='',hard:bool=False,value:Any=None):
+    def add(rank:int,status:str,detail:str='',hard:bool=False,value:Any=None,score_enabled:bool=True):
         meta=catalog.get(rank,{})
         group=_GROUPS.get(meta.get('group'),'OTHER')
-        filters.append(_filter(rank,meta.get('name',f'Filter {rank}'),group,status,detail,hard,value))
+        filters.append(_filter(rank,meta.get('name',f'Filter {rank}'),group,status,detail,hard,value,score_enabled))
 
     reg=str(regime_state.get('regime') or 'WARMING');tv=_f(regime_state.get('trend_vote'));up=_f(regime_state.get('breadth_up_pct'));down=_f(regime_state.get('breadth_down_pct'))
     atr=_f(f.get('atr_pct'));gap=_f(f.get('gap_pct'));rs=_f(f.get('relative_strength20'));ret20=sign*_f(f.get('ret20'));ret60=sign*_f(f.get('ret60'));trend=sign*_f(f.get('trend'));vr=_f(f.get('volume_ratio'));turn=_f(f.get('turnover20'))
     open_observed=bool(f.get('open_observed', True))
     px=_f(f.get('close'));rpos=_f(f.get('range20_pos'),.5);vwap=_f(f.get('vwap'));higher=sign*_f(f.get('higher_tf_trend'))
     now=datetime.now(IST);t=now.time().replace(tzinfo=None)
+
+    def sector_proxy_key(industry:str)->Optional[str]:
+        x=str(industry or '').upper()
+        mapping=(
+            (("SOFTWARE","IT ","INFORMATION TECHNOLOGY","TECHNOLOGY"),"US_TECH"),
+            (("SEMICONDUCTOR","ELECTRONIC"),"US_SEMIS"),
+            (("BANK","FINANCE","FINANCIAL","INSURANCE"),"US_FINANCIALS"),
+            (("OIL","GAS","PETROLEUM","ENERGY"),"US_ENERGY"),
+            (("PHARMA","HEALTH","HOSPITAL"),"US_HEALTH"),
+            (("AUTO","AUTOMOBILE","CONSUMER DURABLE"),"US_DISCRETIONARY"),
+            (("METAL","MINING","CEMENT","MATERIAL"),"US_MATERIALS"),
+            (("INDUSTRIAL","CAPITAL GOODS","CONSTRUCTION","ENGINEERING"),"US_INDUSTRIALS"),
+            (("FMCG","FOOD","BEVERAGE","STAPLE"),"US_STAPLES"),
+        )
+        for keys,label in mapping:
+            if any(k in x for k in keys):return label
+        return None
 
     # 1-10 market context
     add(1,'WARN' if reg=='WARMING' else ('WARN' if reg.startswith('HIGH_VOL') else 'PASS'),f'regime={reg}',False,reg)
@@ -106,8 +123,16 @@ def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamen
         add(12,'PASS' if direction_breadth>=55 else ('WARN' if direction_breadth>=45 else 'FAIL'),f"sector directional breadth={direction_breadth:.1f}%")
         add(14,'PASS' if sign*rel20>0 else 'WARN',f'stock-vs-industry ret20={rel20:.2f}%')
         add(16,'PASS' if bool(sector_ctx.get('supportive')) else 'WARN',f"peer sample={sector_ctx.get('sample',0)}")
-        add(17,'UNKNOWN','sector/index ETF confirmation is not fabricated without mapped vehicle history')
-    add(13,'UNKNOWN' if abs(rs)<1e-9 else ('PASS' if sign*rs>0 else 'FAIL'),f'relative strength20={rs:.2f}' if abs(rs)>=1e-9 else 'benchmark-relative series not supplied')
+        proxy=sector_proxy_key(sector_ctx.get('industry'))
+        proxy_move=_f((global_ctx.get('moves_pct') or {}).get(proxy),999) if proxy else 999
+        if proxy and proxy_move!=999:
+            aligned=sign*proxy_move>0
+            add(17,'PASS' if aligned else 'WARN',f'{proxy} move={proxy_move:.2f}%; mapped external sector proxy; SHADOW_ONLY',score_enabled=False)
+        else:
+            add(17,'UNKNOWN','mapped sector proxy unavailable; no vehicle confirmation inferred',score_enabled=False)
+    rs_available=bool(f.get('benchmark_relative_available'))
+    add(13,'UNKNOWN' if not rs_available else ('PASS' if sign*rs>0 else ('WARN' if abs(rs)<0.05 else 'FAIL')),
+        f'relative strength20 vs NIFTY={rs:.2f}' if rs_available else 'benchmark-relative NIFTY series not ready')
     add(15,'PASS' if ret20>0 and ret60>=0 else ('WARN' if ret20>0 else 'FAIL'),f'directional ret20={ret20:.2f}, ret60={ret60:.2f}')
     inst=_f(fundamentals.get('heldPercentInstitutions'),-1)
     inst_flow=_f(institutional_ctx.get('score'));inst_conf=_f(institutional_ctx.get('confidence'));inst_dir=str(institutional_ctx.get('direction') or 'UNKNOWN')
@@ -140,7 +165,15 @@ def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamen
     else:add(23,'PASS' if (fcf>0 if side=='LONG' else fcf<0) else 'WARN',f'FCF={fcf:.0f}')
     if debt==999:add(24,'UNKNOWN','debt/equity unavailable')
     else:add(24,'PASS' if (debt<150 if side=='LONG' else debt>180) else 'WARN',f'debt/equity={debt:.1f}')
-    add(25,'UNKNOWN','promoter pledge/governance feed not configured; severe governance cannot be inferred')
+    governance=list(institutional_ctx.get('governance_risk_disclosures') or [])
+    insider_rows=list(institutional_ctx.get('insider_transactions') or [])
+    if governance:
+        kinds=sorted({str(x.get('kind') or 'DISCLOSURE') for x in governance})
+        add(25,'WARN',f"official NSE governance/pledge disclosure(s): {','.join(kinds[:4])}; SHADOW_ONLY",score_enabled=False)
+    elif insider_rows:
+        add(25,'PASS',f"official NSE PIT disclosures captured={len(insider_rows)}; no governance-risk classification in current window; SHADOW_ONLY",score_enabled=False)
+    else:
+        add(25,'UNKNOWN','no recent official NSE pledge/governance/PIT disclosure captured; absence is not treated as safety',score_enabled=False)
     add(26,'PASS' if inst>=.05 else ('WARN' if inst>=0 else 'UNKNOWN'),f'institutional ownership={inst:.3f}' if inst>=0 else 'not available')
     if pe==999:add(27,'UNKNOWN','valuation unavailable')
     else:add(27,'PASS' if ((0<pe<70) if side=='LONG' else (pe<=0 or pe>70)) else 'WARN',f'P/E={pe:.2f}')
@@ -217,7 +250,7 @@ def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamen
     earned=possible=0.0
     val={'PASS':1.0,'WARN':0.45,'FAIL':0.0}
     for r in filters:
-        if r['status']=='UNKNOWN':continue
+        if r['status']=='UNKNOWN' or not r.get('score_enabled',True):continue
         w=weights.get(r['group'],1.0)
         possible+=w;earned+=w*val.get(r['status'],0.0)
     score=100.0*earned/possible if possible else 0.0
@@ -229,6 +262,13 @@ def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamen
     decision='NO_TRADE' if hard_blockers else ('ELIGIBLE' if score>=threshold else 'WATCH')
     return {
         'decision':decision,'score':round(score,2),'minimum_score':threshold,'hard_blockers':hard_blockers,
+        'shadow_evidence':{
+            'delivery':institutional_ctx.get('delivery_evidence'),
+            'insider_transactions':list(institutional_ctx.get('insider_transactions') or [])[:5],
+            'regulatory_disclosures':list(institutional_ctx.get('regulatory_disclosures') or [])[:5],
+            'derivatives_positioning':institutional_ctx.get('derivatives_positioning'),
+            'policy':'V685_NEW_INSTITUTIONAL_EVIDENCE_EXCLUDED_FROM_SCORE_UNTIL_INCREMENTAL_OOS_VALIDATED',
+        },
         'filters':filters,'evaluated_filters':sum(1 for r in filters if r['status']!='UNKNOWN'),
         'unknown_filters':sum(1 for r in filters if r['status']=='UNKNOWN'),
         'hard_fail_count':len(hard_blockers),'aligned_candlestick_quality':round(candle_quality,1),

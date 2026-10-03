@@ -1,12 +1,12 @@
-# PS Scanner Quant v6.8.4
+# PS Scanner Quant v6.8.5
 
-v6.8.4 is the current public-repository release candidate. It fixes the runtime-contention defect exposed by real-Mac v6.8.3 validation: full-NSE LTP transport now has a hard aggregate deadline, recurring history warmers use bounded rotating priority pools instead of reparsing the whole cache every short cadence, and heavy startup warmers are staggered. Full NSE research breadth and every trading/risk/evidence invariant remain unchanged.
+v6.8.5 is the current public-repository release candidate. It audits the professional/institutional evidence requests against the current application, retains the v6.8.0 shared-evidence and institutional features that were already present, and closes the remaining implementable evidence gaps with cached NIFTY-relative strength, NSE deliverable-volume and PIT/regulatory disclosures, bounded Groww F&O positioning, and execution-only displayed market-depth controls. Newly wired research evidence is shadow-only until incremental OOS value is validated. v6.8.4 runtime-contention hardening and every trading/risk/frozen-identity invariant remain intact.
 
 See:
+- `RELEASE_v6.8.5.md`
+- `ARCHITECTURE_AUDIT_v6.8.5.md`
 - `RELEASE_v6.8.4.md`
 - `ARCHITECTURE_AUDIT_v6.8.4.md`
-- `RELEASE_v6.8.3.md`
-- `ARCHITECTURE_AUDIT_v6.8.3.md`
 
 # PS Scanner Quant v6.8.1 — Bounded Performance Analytics Reliability
 

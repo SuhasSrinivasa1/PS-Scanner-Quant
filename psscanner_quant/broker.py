@@ -301,11 +301,19 @@ class GrowwBroker:
                     "elapsed_seconds":elapsed,"failed_symbols_sample":failed_symbols[:12]})
         return out
 
-    def quote(self, trading_symbol: str, exchange: str = "NSE") -> Dict[str, Any]:
+    def quote(self, trading_symbol: str, exchange: str = "NSE", segment: str = "CASH") -> Dict[str, Any]:
         return dict(self._request(
             "GET", "/v1/live-data/quote",
-            params={"exchange": exchange, "segment": "CASH", "trading_symbol": trading_symbol},
+            params={"exchange": exchange, "segment": str(segment).upper(), "trading_symbol": trading_symbol},
             timeout=10,
+        ) or {})
+
+    def option_chain(self, underlying: str, expiry_date: str, exchange: str = "NSE") -> Dict[str, Any]:
+        """Return Groww's live FNO option chain, including OI, volume and Greeks/IV."""
+        return dict(self._request(
+            "GET", f"/v1/option-chain/exchange/{str(exchange).upper()}/underlying/{str(underlying).upper()}",
+            params={"expiry_date": str(expiry_date)},
+            timeout=12,
         ) or {})
 
     def historical(self, groww_symbol: str, start_time: str, end_time: str, interval: str = "1day", exchange: str = "NSE") -> List[List[Any]]:
