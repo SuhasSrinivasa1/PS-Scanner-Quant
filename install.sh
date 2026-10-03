@@ -16,7 +16,7 @@ MODE="migration"
 cleanup(){ rm -f "$TMPSECRET" "$OLD_STATUS" "$NEW_HEALTH" "$NEW_GROWW" "$PLIST_BACKUP" 2>/dev/null || true; }
 trap cleanup EXIT
 
-echo "PS Scanner Quant v6.8.2 safe install / in-place upgrade"
+echo "PS Scanner Quant v6.8.3 safe install / in-place upgrade"
 echo "Target: $APP"
 echo
 
@@ -226,14 +226,16 @@ plutil -lint "$PLIST"
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
+EXPECTED_VERSION="$("$APP/.venv/bin/python" -c 'from psscanner_quant.constants import VERSION; print(VERSION)')"
 ok=0
 for i in {1..60}; do
   if curl -fsS --max-time 3 http://127.0.0.1:8765/api/health > "$NEW_HEALTH" 2>/dev/null; then
-    if python3 - "$NEW_HEALTH" <<'PYH'
+    if python3 - "$NEW_HEALTH" "$EXPECTED_VERSION" <<'PYH'
 import json,sys
 try:d=json.load(open(sys.argv[1]))
 except Exception:d={}
-ok=(d.get('version')=='6.8.1' and d.get('engine_alive') is True)
+expected=sys.argv[2]
+ok=(d.get('version')==expected and d.get('engine_alive') is True)
 raise SystemExit(0 if ok else 1)
 PYH
     then ok=1; break; fi
@@ -241,7 +243,7 @@ PYH
   sleep 2
 done
 if [[ $ok -ne 1 ]]; then
-  echo "v6.8.2 service did not pass application health check. See $APP/logs/service-error.log" >&2
+  echo "v6.8.3 service did not pass application health check. See $APP/logs/service-error.log" >&2
   exit 20
 fi
 
@@ -272,7 +274,7 @@ PYA
 done
 
 if [[ $groww_ok -ne 1 ]]; then
-  echo "v6.8.2 application started, but Groww connectivity could not be verified after explicit probes." >&2
+  echo "v6.8.3 application started, but Groww connectivity could not be verified after explicit probes." >&2
   if [[ $groww_auth_required -gt 0 ]]; then
     echo "Groww returned AUTH_REQUIRED during verification." >&2
   else
@@ -282,16 +284,17 @@ if [[ $groww_ok -ne 1 ]]; then
 fi
 
 curl -fsS --max-time 5 http://127.0.0.1:8765/api/health > "$NEW_HEALTH" 2>/dev/null || true
-python3 - "$NEW_HEALTH" "$NEW_GROWW" <<'PYV'
+python3 - "$NEW_HEALTH" "$NEW_GROWW" "$EXPECTED_VERSION" <<'PYV'
 import json,sys
 try:h=json.load(open(sys.argv[1]))
 except Exception:h={}
 try:g=json.load(open(sys.argv[2]))
 except Exception:g={}
+expected=sys.argv[3]
 print('New app:', h.get('app'), h.get('version'))
 print('New Groww status:', g.get('status') or 'UNKNOWN')
 print('Credential capabilities:', g.get('credential_capabilities') or {})
-ok=(h.get('version')=='6.8.1' and h.get('engine_alive') is True and g.get('connected') is True)
+ok=(h.get('version')==expected and h.get('engine_alive') is True and g.get('connected') is True)
 raise SystemExit(0 if ok else 1)
 PYV
 
@@ -300,7 +303,7 @@ trap cleanup EXIT
 
 echo
 echo "============================================================"
-echo "PS Scanner Quant v6.8.2 INSTALLED"
+echo "PS Scanner Quant v6.8.3 INSTALLED"
 echo "UI: http://127.0.0.1:8765"
 echo "Groww authentication: VERIFIED"
 echo "v6 runtime data/ledger: PRESERVED"
