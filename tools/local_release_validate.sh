@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="6.8.4"
+VERSION="6.8.5"
 LINUX_PLATFORM="${LINUX_PLATFORM:-linux/amd64}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BRANCH="$(git -C "$REPO_ROOT" branch --show-current)"
 HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 DIST_DIR="$REPO_ROOT/dist"
-TMP_ROOT="$(mktemp -d "$REPO_ROOT/.psscanner-v684.XXXXXX")"
+TMP_ROOT="$(mktemp -d "$REPO_ROOT/.psscanner-v685.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 fail(){ echo "FAIL: $*" >&2; exit 1; }
@@ -51,9 +51,9 @@ run_native(){
 from pathlib import Path
 html=Path("static/index.html").read_text()
 js=html.rsplit("<script>",1)[1].split("</script>",1)[0]
-Path("/tmp/ps-scanner-ui-v684.js").write_text(js)
+Path("/tmp/ps-scanner-ui-v685.js").write_text(js)
 PY
-    node --check /tmp/ps-scanner-ui-v684.js
+    node --check /tmp/ps-scanner-ui-v685.js
     zsh -n install.sh
     zsh -n run.sh
     python tools/check_no_secrets.py
