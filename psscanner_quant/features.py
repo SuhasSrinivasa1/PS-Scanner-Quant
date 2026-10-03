@@ -161,8 +161,8 @@ def enrich(df: pd.DataFrame, benchmark: Optional[pd.Series] = None) -> pd.DataFr
     return x.replace([np.inf, -np.inf], np.nan)
 
 
-def latest_features(df: pd.DataFrame, fundamentals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    x = enrich(df)
+def latest_features(df: pd.DataFrame, fundamentals: Optional[Dict[str, Any]] = None, benchmark: Optional[pd.Series] = None) -> Dict[str, Any]:
+    x = enrich(df, benchmark=benchmark)
     if x.empty:
         return {}
     r = x.iloc[-1]
@@ -177,6 +177,7 @@ def latest_features(df: pd.DataFrame, fundamentals: Optional[Dict[str, Any]] = N
     out = {k: _safe(r.get(k), 0.0) for k in keys}
     out["open_observed"] = bool(pd.notna(r.get("open")))
     out["open_coverage_pct"] = round(100.0 * float(pd.to_numeric(x["open"], errors="coerce").notna().mean()), 2) if len(x) else 0.0
+    out["benchmark_relative_available"] = bool(benchmark is not None and len(benchmark))
     out["asof"] = str(x.index[-1])
     if fundamentals:
         out["fundamentals"] = fundamentals
