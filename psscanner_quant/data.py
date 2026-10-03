@@ -834,36 +834,46 @@ def _active_nse_recommendation_symbols() -> List[str]:
 
 
 def warm_intraday_history(max_symbols: int=24) -> Dict[str,Any]:
-    """Rotate intraday history across full NSE breadth with useful-first hydration."""
+    """Rotate intraday history across full NSE breadth without O(N) cache reparsing.
+
+    Full-breadth discovery already publishes current mover/readiness telemetry. This
+    warmer consumes that snapshot plus a bounded rotating slice, so every symbol remains
+    eligible over time without rereading thousands of JSON files every 90 seconds.
+    """
     metas=universe(); syms=[str(x.get("symbol") or "").upper() for x in metas if x.get("symbol")]
     if not syms:return {"attempted":0,"ready":0,"cursor":0,"universe":0}
     symset=set(syms); n=max(1,min(int(max_symbols),len(syms)))
     cursor=int(get_state("intraday_history_warm_cursor",0) or 0)%len(syms)
     active=[s for s in _active_nse_recommendation_symbols() if s in symset]
-    activity=_activity_rank_full_breadth()[:max(n*6,120)]
-    need=[s for s in syms if len(_load_raw_candles(_history_path(s,"5minute")))<30]
-    needset=set(need)
-    anchor_need=[str(r.get("symbol") or "").upper() for r in metas
-                 if str(r.get("industry") or "UNKNOWN").upper()!="UNKNOWN"
-                 and str(r.get("symbol") or "").upper() in needset]
     ustate=get_state("universe_status",{}) or {}
-    newly=[s for s in (ustate.get("new_since_last_refresh") or []) if s in symset]
-    need_cursor=int(get_state("intraday_missing_cursor",0) or 0)%max(1,len(need) or 1)
-    need_rot=[need[(need_cursor+i)%len(need)] for i in range(len(need))] if need else []
-    rotating=[syms[(cursor+i)%len(syms)] for i in range(min(len(syms),n*4))]
+    newly=[str(s).upper() for s in (ustate.get("new_since_last_refresh") or []) if str(s).upper() in symset]
+    breadth=get_state("full_breadth_discovery",{}) or {}
+    activity=[]
+    for item in breadth.get("top_absolute_movers") or []:
+        s=str((item or {}).get("symbol") or "").upper()
+        if s in symset and s not in activity:activity.append(s)
+        if len(activity)>=max(n*4,80):break
+    rotate_count=min(len(syms),max(n*8,256))
+    rotating=[syms[(cursor+i)%len(syms)] for i in range(rotate_count)]
+    pool=[]
+    for s in active+newly+activity+rotating:
+        if s in symset and s not in pool:pool.append(s)
+    missing=[];ready_cached=[]
+    for s in pool:
+        if len(_load_raw_candles(_history_path(s,"5minute")))<30:missing.append(s)
+        else:ready_cached.append(s)
     chosen=[]
-    for s in active+newly+activity+anchor_need+need_rot+rotating:
+    for s in active+newly+missing+activity+ready_cached:
         if s not in chosen:chosen.append(s)
         if len(chosen)>=n:break
     ready=0
     for sym in chosen:
         if len(history(sym,"5minute",allow_network=True))>=30:ready+=1
-    set_state("intraday_history_warm_cursor",(cursor+n)%len(syms))
-    if need:set_state("intraday_missing_cursor",(need_cursor+max(1,len(chosen)))%len(need))
+    set_state("intraday_history_warm_cursor",(cursor+rotate_count)%len(syms))
     out={"attempted":len(chosen),"ready":ready,"cursor":cursor,"universe":len(syms),
          "priority_active":len(active),"priority_new":len(newly),"priority_movers":len(activity),
-         "priority_industry_anchors":len(anchor_need),"missing_before":len(need),"at":now_iso(),
-         "policy":"FULL_NSE_USEFUL_FIRST_ACTIVE_NEW_MOVERS_INDUSTRY_ANCHORS_THEN_ROTATION"}
+         "priority_pool":len(pool),"missing_in_priority_pool":len(missing),"at":now_iso(),
+         "policy":"FULL_NSE_BOUNDED_ROTATION_ACTIVE_NEW_CACHED_MOVERS_NO_FULL_CACHE_REPARSE"}
     set_state("last_intraday_history_warm",out);return out
 
 
@@ -941,41 +951,57 @@ def _fast_raw_history_coverage(symbols: Iterable[str], interval: str="1day", min
 
 
 def warm_daily_history(max_symbols: int=24) -> Dict[str,Any]:
-    """Populate daily history across every equity, hydrating representative evidence first."""
+    """Populate daily history with bounded rotating cache inspection.
+
+    The full NSE universe is preserved. A bounded slice rotates through every symbol,
+    while active recommendations and newly listed names remain first priority. Full
+    breadth readiness comes from the dedicated market snapshot instead of reparsing every
+    daily JSON cache again in this 90-second worker.
+    """
     metas=universe(); syms=[str(x.get("symbol") or "").upper() for x in metas if x.get("symbol")]
     if not syms:return {"attempted":0,"ready":0,"errors":0,"at":now_iso(),"universe":0}
-    symset=set(syms); need=[];rest=[]
-    for sym in syms:
-        if len(_load_raw_candles(_history_path(sym,"1day")))<30:need.append(sym)
-        else:rest.append(sym)
-    needset=set(need)
+    symset=set(syms);n=max(1,min(int(max_symbols),len(syms)))
     active=[s for s in _active_nse_recommendation_symbols() if s in symset]
+    ustate=get_state("universe_status",{}) or {}
+    newly=[str(s).upper() for s in (ustate.get("new_since_last_refresh") or []) if str(s).upper() in symset]
+    cursor=int(get_state("daily_history_warm_cursor",0) or 0)%len(syms)
+    rotate_count=min(len(syms),max(n*8,256))
+    rotating=[syms[(cursor+i)%len(syms)] for i in range(rotate_count)]
+    pool=[]
+    for s in active+newly+rotating:
+        if s in symset and s not in pool:pool.append(s)
+    missing=[];ready_cached=[]
+    for s in pool:
+        if len(_load_raw_candles(_history_path(s,"1day")))<30:missing.append(s)
+        else:ready_cached.append(s)
+    needset=set(missing)
     anchor_need=[str(r.get("symbol") or "").upper() for r in metas
                  if str(r.get("industry") or "UNKNOWN").upper()!="UNKNOWN"
                  and str(r.get("symbol") or "").upper() in needset]
-    ustate=get_state("universe_status",{}) or {}
-    newly=[s for s in (ustate.get("new_since_last_refresh") or []) if s in symset]
-    missing_cursor=int(get_state("daily_missing_cursor",0) or 0)%max(1,len(need) or 1)
-    need_rot=[need[(missing_cursor+i)%len(need)] for i in range(len(need))] if need else []
-    refresh_cursor=int(get_state("daily_history_warm_cursor",0) or 0)%max(1,len(rest) or 1)
-    rotated=[rest[(refresh_cursor+i)%len(rest)] for i in range(len(rest))] if rest else []
-    ordered=active+newly+anchor_need+need_rot+rotated;chosen=[]
+    ordered=active+newly+anchor_need+missing+ready_cached;chosen=[]
     for sym in ordered:
         if sym not in chosen:chosen.append(sym)
-        if len(chosen)>=max(1,min(int(max_symbols),len(syms))):break
+        if len(chosen)>=n:break
     ready=0;errors=0
     for sym in chosen:
         try:
             if len(history(sym,"1day",allow_network=True))>=30:ready+=1
             else:errors+=1
         except Exception:errors+=1
-    if need:set_state("daily_missing_cursor",(missing_cursor+max(1,len(chosen)))%len(need))
-    if rest:set_state("daily_history_warm_cursor",(refresh_cursor+max(1,len(chosen)))%len(rest))
-    cov=_fast_raw_history_coverage(syms,"1day",30)
+    set_state("daily_history_warm_cursor",(cursor+rotate_count)%len(syms))
+    breadth=get_state("full_breadth_discovery",{}) or {}
+    if int(breadth.get("universe") or 0)==len(syms) and breadth.get("status")=="CURRENT":
+        cov={"interval":"1day","symbols":len(syms),"ready":int(breadth.get("daily_history_ready") or 0),
+             "minimum_rows":30,"mode":"CACHED_FULL_BREADTH_DISCOVERY","at":breadth.get("at")}
+    else:
+        sample=_fast_raw_history_coverage(pool,"1day",30)
+        cov={"interval":"1day","symbols":len(syms),"ready":None,"minimum_rows":30,
+             "sample_symbols":sample.get("symbols"),"sample_ready":sample.get("ready"),
+             "mode":"BOUNDED_PRIORITY_SAMPLE_PENDING_FULL_BREADTH","at":now_iso()}
     out={"attempted":len(chosen),"ready":ready,"errors":errors,"coverage":cov,"universe":len(syms),
-         "missing_before":len(need),"priority_active":len(active),"priority_new":len(newly),
-         "priority_industry_anchors":len(anchor_need),"at":now_iso(),
-         "policy":"FULL_NSE_DAILY_ACTIVE_NEW_INDUSTRY_ANCHORS_THEN_MISSING_ROTATION"}
+         "priority_pool":len(pool),"missing_in_priority_pool":len(missing),"priority_active":len(active),
+         "priority_new":len(newly),"priority_industry_anchors":len(anchor_need),"at":now_iso(),
+         "policy":"FULL_NSE_DAILY_BOUNDED_ROTATION_ACTIVE_NEW_NO_FULL_CACHE_REPARSE"}
     set_state("daily_history_warm_status",out);return out
 
 

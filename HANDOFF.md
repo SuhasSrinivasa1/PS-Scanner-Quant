@@ -1,8 +1,16 @@
 # PS Scanner handoff
 
-Current source version: **6.8.3**.
+Current source version: **6.8.4**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.4 bounded full-breadth runtime contention
+
+v6.8.4 addresses the separate runtime-load defect found after the v6.8.3 Mac install succeeded. The production runtime reported version 6.8.3, engine alive, Groww connected, execution-critical health state available, and position reconciliation verified, but sustained background load later caused health to exceed a 10-second client deadline, bounded performance to degrade before completing the CLOSED-row aggregation, and `market_snapshot` to exceed its watchdog threshold.
+
+The fix keeps full NSE breadth. Groww LTP batching now has a hard aggregate wall-clock budget with partial-success telemetry; the 90-second daily/intraday warmers use bounded rotating priority pools instead of reparsing the entire cache; heavy warmers are staggered away from initial market snapshot; and market-snapshot internal stage telemetry identifies LTP/breadth/regime stalls. No trading threshold, risk control, evidence rule, frozen identity, Static-IP scope, or Champion/Challenger policy is changed.
+
+See `RELEASE_v6.8.4.md` and `ARCHITECTURE_AUDIT_v6.8.4.md`.
 
 ## v6.8.3 installer health-gate reliability
 

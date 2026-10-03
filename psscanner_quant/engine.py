@@ -1451,7 +1451,7 @@ class Engine:
             out[name]={**state,"alive":bool(t.is_alive()),"thread":t.name,"timeout_seconds":timeout,
                        "elapsed_seconds":round(elapsed,2) if elapsed is not None else state.get("duration_seconds"),
                        "hung":bool(t.is_alive() and state.get("state")=="RUNNING" and elapsed is not None and elapsed>timeout),
-                       "current_stage":state.get("state"),"processed":None,"remaining":None,
+                       "current_stage":state.get("stage") or state.get("state"),"processed":None,"remaining":None,
                        "rejection_counters":{},"recovery_state":None,
                        "restart_count":int(self.worker_restarts.get(name,0)),"passive_cached":True}
         return out
@@ -1496,15 +1496,28 @@ class Engine:
         settings=load_settings()
         warm_daily_history(int(settings.get("daily_history_warm_batch",20)))
 
+    def _set_worker_stage(self,name,stage):
+        state=dict(self.worker_runtime.get(name) or {})
+        if state.get("state")=="RUNNING":
+            state["stage"]=str(stage)
+            self.worker_runtime[name]=state
+
     def _market_snapshot(self):
-        # Full-market batched LTP refresh. Groww supports 50 instruments per LTP request;
-        # broker.ltp handles batching. No stock is removed for size/liquidity reasons.
-        syms=full_nse_symbols();prices=refresh_live_price_cache(syms) if syms else {}
+        # Full-market batched LTP refresh. Groww supports 50 instruments per LTP request.
+        # v6.8.4 adds a hard broker-side wall-clock budget and stage telemetry so a
+        # degraded network path cannot silently consume the entire worker timeout.
+        self._set_worker_stage("market_snapshot","UNIVERSE")
+        syms=full_nse_symbols()
+        self._set_worker_stage("market_snapshot","LTP_REFRESH")
+        prices=refresh_live_price_cache(syms) if syms else {}
+        self._set_worker_stage("market_snapshot","BREADTH_DISCOVERY")
         breadth=full_breadth_discovery_snapshot(prices)
+        self._set_worker_stage("market_snapshot","REGIME_CLASSIFICATION")
         state=classify(prices=prices,allow_network_prices=False)
+        self._set_worker_stage("market_snapshot","PUBLISH")
         set_state("market_snapshot_status",{"at":now_iso(),"symbols":len(syms),"prices":len(prices),
             "breadth_evaluated":breadth.get("evaluated",0),"regime":state.get("regime"),
-            "policy":"FULL_NSE_BATCHED_LTP_ALL_EQUITIES_SCANNERS_READ_CACHE"})
+            "policy":"FULL_NSE_BATCHED_LTP_HARD_BUDGET_ALL_EQUITIES_SCANNERS_READ_CACHE"})
         fabric_publish("full_market_quotes",source="GROWW_BATCHED_LTP",consumers=("INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","GLOBAL_INDIA","LIVE_UPDATE"),payload={"prices":len(prices),"universe":len(syms)},network_fetch=True,symbols=len(prices))
         fabric_publish("market_regime",source="FULL_NSE_CACHED_BREADTH",consumers=("INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","GLOBAL_INDIA"),payload={"regime":state.get("regime"),"sample":state.get("sample")},network_fetch=False,symbols=state.get("sample"))
 
@@ -1630,8 +1643,10 @@ class Engine:
             ("priority_quotes",float(settings.get("live_update_interval_seconds",60)),self._priority_quote_refresh,3),
             ("live_update",float(settings.get("live_update_interval_seconds",60)),self._live_update,4),
             ("intraday",float(settings.get("intraday_worker_interval_seconds",120)),run_intraday_cycle,5),
-            ("maintenance",float(settings.get("maintenance_worker_interval_seconds",90)),self._maintenance,8),
-            ("daily_history",float(settings.get("daily_history_worker_interval_seconds",90)),self._daily_history,9),
+            # Keep recurring full-breadth/cache warmers out of the first market-snapshot
+            # burst. Their intervals are unchanged; only startup phases are staggered.
+            ("maintenance",float(settings.get("maintenance_worker_interval_seconds",90)),self._maintenance,45),
+            ("daily_history",float(settings.get("daily_history_worker_interval_seconds",90)),self._daily_history,60),
             ("weekly",float(settings.get("horizon_worker_interval_seconds",300)),lambda:run_single_horizon_cycle("WEEKLY"),10),
             ("monthly",float(settings.get("horizon_worker_interval_seconds",300)),lambda:run_single_horizon_cycle("MONTHLY"),12),
             ("circuit",float(settings.get("circuit_worker_interval_seconds",120)),self._circuit,14),

@@ -1,12 +1,12 @@
-# PS Scanner Quant v6.8.3
+# PS Scanner Quant v6.8.4
 
-v6.8.3 is the current public-repository release. It carries forward the v6.8.2 clean baseline and fixes the installer post-launch version gate that incorrectly rolled back a healthy v6.8.2 service. It carries forward the production-validated v6.8.1 bounded performance fix and adds indexed, execution-critical-first health snapshots plus Mac runtime compatibility hardening. No trading threshold, risk gate, frozen-book identity, evidence rule, or Static-IP scope is loosened.
+v6.8.4 is the current public-repository release candidate. It fixes the runtime-contention defect exposed by real-Mac v6.8.3 validation: full-NSE LTP transport now has a hard aggregate deadline, recurring history warmers use bounded rotating priority pools instead of reparsing the whole cache every short cadence, and heavy startup warmers are staggered. Full NSE research breadth and every trading/risk/evidence invariant remain unchanged.
 
 See:
+- `RELEASE_v6.8.4.md`
+- `ARCHITECTURE_AUDIT_v6.8.4.md`
 - `RELEASE_v6.8.3.md`
 - `ARCHITECTURE_AUDIT_v6.8.3.md`
-- `RELEASE_v6.8.2.md`
-- `ARCHITECTURE_AUDIT_v6.8.2.md`
 
 # PS Scanner Quant v6.8.1 — Bounded Performance Analytics Reliability
 
