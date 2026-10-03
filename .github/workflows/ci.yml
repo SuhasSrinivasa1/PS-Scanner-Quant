@@ -1,0 +1,181 @@
+name: PS Scanner CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - 'psscanner_quant/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'static/**'
+      - 'requirements.txt'
+      - 'install.sh'
+      - 'run.sh'
+      - 'RELEASE_v*.md'
+      - 'ARCHITECTURE_AUDIT_v*.md'
+      - 'HANDOFF.md'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'psscanner_quant/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'static/**'
+      - 'requirements.txt'
+      - 'install.sh'
+      - 'run.sh'
+      - 'RELEASE_v*.md'
+      - 'ARCHITECTURE_AUDIT_v*.md'
+      - 'HANDOFF.md'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression-ubuntu:
+    name: Regression (ubuntu-latest)
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Compile Python
+        run: python -m compileall -q psscanner_quant tests tools
+      - name: Initialize isolated database
+        run: python -c "from psscanner_quant.db import init_db; init_db()"
+      - name: Unit/regression suite
+        run: python -m unittest discover -s tests -v
+      - name: Validate UI JavaScript syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          html=Path("static/index.html").read_text()
+          js=html.rsplit("<script>",1)[1].split("</script>",1)[0]
+          Path("/tmp/ps-scanner-ui.js").write_text(js)
+          PY
+          node --check /tmp/ps-scanner-ui.js
+      - name: Validate shell syntax
+        run: |
+          zsh -n install.sh
+          zsh -n run.sh
+          zsh -n tools/local_release_validate.sh
+      - name: Secret leakage scan
+        run: python tools/check_no_secrets.py
+      - name: Dependency consistency
+        run: python -m pip check
+
+  regression-macos:
+    name: Regression (macos-14)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Compile Python
+        run: python -m compileall -q psscanner_quant tests tools
+      - name: Initialize isolated database
+        run: python -c "from psscanner_quant.db import init_db; init_db()"
+      - name: Unit/regression suite
+        run: python -m unittest discover -s tests -v
+      - name: Validate UI JavaScript syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          html=Path("static/index.html").read_text()
+          js=html.rsplit("<script>",1)[1].split("</script>",1)[0]
+          Path("/tmp/ps-scanner-ui.js").write_text(js)
+          PY
+          node --check /tmp/ps-scanner-ui.js
+      - name: Validate shell syntax
+        run: |
+          zsh -n install.sh
+          zsh -n run.sh
+          zsh -n tools/local_release_validate.sh
+      - name: Secret leakage scan
+        run: python tools/check_no_secrets.py
+      - name: Dependency consistency
+        run: python -m pip check
+
+  package:
+    name: Build installable ZIP
+    needs: [regression-ubuntu, regression-macos]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'from psscanner_quant.constants import VERSION; print(str(VERSION).lstrip("v"))')"
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Build tracked-source package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="PS_Scanner_Quant_v$VERSION"
+          STAGE="$RUNNER_TEMP/$NAME"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          git archive HEAD | tar -x -C "$STAGE"
+          rm -rf "$STAGE/.github"
+          find "$STAGE" -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find "$STAGE" -type f -name '*.pyc' -delete
+          (cd "$RUNNER_TEMP" && zip -qr "$GITHUB_WORKSPACE/$NAME.zip" "$NAME")
+          unzip -t "$GITHUB_WORKSPACE/$NAME.zip"
+          sha256sum "$GITHUB_WORKSPACE/$NAME.zip" | tee "$GITHUB_WORKSPACE/$NAME.zip.sha256"
+      - name: Upload installable package
+        uses: actions/upload-artifact@v6
+        with:
+          name: PS_Scanner_Quant_v${{ steps.version.outputs.version }}
+          path: |
+            PS_Scanner_Quant_v${{ steps.version.outputs.version }}.zip
+            PS_Scanner_Quant_v${{ steps.version.outputs.version }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
