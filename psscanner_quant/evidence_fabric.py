@@ -21,6 +21,7 @@ _DEFAULT_TTL = {
     "priority_quotes": 75.0,
     "full_market_quotes": 240.0,
     "market_regime": 240.0,
+    "benchmark_history": 600.0,
     "global_context": 1200.0,
     "fundamentals": 900.0,
     "sector_context": 1200.0,
