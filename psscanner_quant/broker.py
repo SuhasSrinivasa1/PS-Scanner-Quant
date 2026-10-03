@@ -218,14 +218,23 @@ class GrowwBroker:
     def profile(self) -> Dict[str, Any]:
         return dict(self._request("GET", "/v1/user/detail") or {})
 
-    def ltp(self, exchange_symbols: List[str]) -> Dict[str, float]:
-        """Fetch LTPs without letting one bad batch kill the full NSE snapshot."""
+    def ltp(self, exchange_symbols: List[str], wall_clock_budget_seconds: float = 45.0) -> Dict[str, float]:
+        """Fetch LTPs with partial success and a hard wall-clock budget.
+
+        Full-NSE refreshes can require ~70 batches. Per-request timeouts alone are not
+        enough: a degraded broker/network path could otherwise keep the market-snapshot
+        worker alive for many minutes and starve passive health/performance requests.
+        """
         if not exchange_symbols:
-            self._last_ltp_status={"at":now_iso(),"requested":0,"received":0,"batches":0,"failed_batches":0,"fallback_batches":0}
+            self._last_ltp_status={"at":now_iso(),"requested":0,"received":0,"batches":0,"failed_batches":0,
+                                   "fallback_batches":0,"budget_seconds":0.0,"budget_exhausted":False,"elapsed_seconds":0.0}
             return {}
+        budget=max(5.0,min(float(wall_clock_budget_seconds or 45.0),120.0))
+        started=time.monotonic();deadline=started+budget
         out: Dict[str, float] = {}
         failed_batches=0; fallback_batches=0; primary_batches=0
         failed_symbols: List[str] = []
+        budget_exhausted=False
 
         def absorb(payload: Any) -> None:
             if isinstance(payload, dict):
@@ -235,13 +244,20 @@ class GrowwBroker:
                     except Exception:
                         pass
 
+        def remaining_timeout(cap: float = 10.0) -> float:
+            return max(0.5,min(float(cap),max(0.5,deadline-time.monotonic())))
+
         for i in range(0, len(exchange_symbols), 50):
+            if time.monotonic() >= deadline:
+                budget_exhausted=True
+                failed_symbols.extend(exchange_symbols[i:])
+                break
             batch = exchange_symbols[i:i + 50]; primary_batches += 1
             try:
                 payload = self._request(
                     "GET", "/v1/live-data/ltp",
                     params={"segment": "CASH", "exchange_symbols": ",".join(batch)},
-                    timeout=10,
+                    timeout=remaining_timeout(),
                 ) or {}
                 absorb(payload)
                 continue
@@ -252,12 +268,16 @@ class GrowwBroker:
                 except Exception: pass
                 if status in (400,404,422) and len(batch)>10:
                     for j in range(0,len(batch),10):
+                        if time.monotonic() >= deadline:
+                            budget_exhausted=True
+                            failed_symbols.extend(batch[j:])
+                            break
                         sub=batch[j:j+10]; fallback_batches += 1
                         try:
                             payload = self._request(
                                 "GET", "/v1/live-data/ltp",
                                 params={"segment":"CASH","exchange_symbols":",".join(sub)},
-                                timeout=10,
+                                timeout=remaining_timeout(),
                             ) or {}
                             absorb(payload)
                         except Exception:
@@ -265,15 +285,20 @@ class GrowwBroker:
                 else:
                     failed_symbols.extend(batch)
 
+        elapsed=round(time.monotonic()-started,2)
         self._last_ltp_status={
             "at":now_iso(),"requested":len(exchange_symbols),"received":len(out),
             "batches":primary_batches,"failed_batches":failed_batches,
             "fallback_batches":fallback_batches,"failed_symbols_sample":failed_symbols[:20],
-            "policy":"PARTIAL_SUCCESS_50_BATCHES_BOUNDED_10_FALLBACK",
+            "budget_seconds":budget,"budget_exhausted":budget_exhausted,"elapsed_seconds":elapsed,
+            "policy":"PARTIAL_SUCCESS_50_BATCHES_BOUNDED_10_FALLBACK_HARD_WALL_CLOCK",
         }
-        if failed_batches:
-            health("live_ltp","WARN",f"LTP partial success {len(out)}/{len(exchange_symbols)}; failed batches={failed_batches}",
-                   {"failed_batches":failed_batches,"fallback_batches":fallback_batches,"failed_symbols_sample":failed_symbols[:12]})
+        if failed_batches or budget_exhausted:
+            health("live_ltp","WARN",
+                   f"LTP partial success {len(out)}/{len(exchange_symbols)}; failed batches={failed_batches}; budget_exhausted={budget_exhausted}",
+                   {"failed_batches":failed_batches,"fallback_batches":fallback_batches,
+                    "budget_exhausted":budget_exhausted,"budget_seconds":budget,
+                    "elapsed_seconds":elapsed,"failed_symbols_sample":failed_symbols[:12]})
         return out
 
     def quote(self, trading_symbol: str, exchange: str = "NSE") -> Dict[str, Any]:
