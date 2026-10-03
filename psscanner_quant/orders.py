@@ -80,8 +80,9 @@ def execution_readiness(rec:Optional[Dict[str,Any]]=None, use_cached:bool=False)
     )
 
 
-def _quote_execution_quality(symbol:str, side:str, fallback_px:float)->Dict[str,Any]:
-    out={'status':'UNKNOWN','hard_block':False,'blockers':[],'spread_pct':None}
+def _quote_execution_quality(symbol:str, side:str, fallback_px:float, quantity:int=0)->Dict[str,Any]:
+    out={'status':'UNKNOWN','hard_block':False,'blockers':[],'spread_pct':None,
+         'depth_imbalance':None,'buy_depth_quantity':None,'sell_depth_quantity':None,'opposite_depth_quantity':None}
     try:
         q=broker.quote(symbol);out['quote']=q
         def first(*keys):
@@ -91,18 +92,50 @@ def _quote_execution_quality(symbol:str, side:str, fallback_px:float)->Dict[str,
                     if v>0:return v
                 except Exception:pass
             return 0.0
-        bid=first('bid_price','best_bid_price','bidPrice','bestBidPrice');ask=first('ask_price','best_ask_price','askPrice','bestAskPrice');last=first('last_price','ltp','lastPrice') or fallback_px
+        depth=q.get('depth') if isinstance(q.get('depth'),dict) else {}
+        buys=list(depth.get('buy') or []) if isinstance(depth,dict) else []
+        sells=list(depth.get('sell') or []) if isinstance(depth,dict) else []
+        def level_price(rows):
+            for row in rows:
+                try:
+                    v=float((row or {}).get('price') or 0)
+                    if v>0:return v
+                except Exception:pass
+            return 0.0
+        def level_qty(rows):
+            total=0.0
+            for row in rows:
+                try:total+=max(0.0,float((row or {}).get('quantity') or 0))
+                except Exception:pass
+            return total
+        bid=first('bid_price','best_bid_price','bidPrice','bestBidPrice') or level_price(buys)
+        ask=first('ask_price','best_ask_price','askPrice','bestAskPrice','offer_price') or level_price(sells)
+        last=first('last_price','ltp','lastPrice') or fallback_px
         if bid>0 and ask>0 and last>0:
             spread=(ask-bid)/last*100;out['spread_pct']=round(spread,4)
             if spread>0.80:out['hard_block']=True;out['blockers'].append('live_bid_ask_spread_too_wide')
             out['status']='PASS' if spread<=0.35 else ('WARN' if spread<=0.80 else 'FAIL')
+        buy_depth=level_qty(buys) or first('total_buy_quantity','bid_quantity')
+        sell_depth=level_qty(sells) or first('total_sell_quantity','offer_quantity')
+        if buy_depth>0 or sell_depth>0:
+            out['buy_depth_quantity']=round(buy_depth,2);out['sell_depth_quantity']=round(sell_depth,2)
+            total=buy_depth+sell_depth
+            out['depth_imbalance']=round((buy_depth-sell_depth)/total,4) if total>0 else None
+            opposite=sell_depth if str(side).upper()=='LONG' else buy_depth
+            out['opposite_depth_quantity']=round(opposite,2)
+            if int(quantity or 0)>0 and opposite>0 and float(quantity)>opposite:
+                out['hard_block']=True;out['blockers'].append('insufficient_displayed_depth_for_order_quantity')
+            if int(quantity or 0)>0 and opposite<=0:
+                out['hard_block']=True;out['blockers'].append('no_executable_counterparty_depth')
+        else:
+            out['depth_status']='UNKNOWN_NOT_RETURNED'
         up=first('upper_circuit_limit','upperCircuitLimit');dn=first('lower_circuit_limit','lowerCircuitLimit')
         if last>0 and ((side=='LONG' and up>0 and abs(up-last)/last*100<.03) or (side=='SHORT' and dn>0 and abs(last-dn)/last*100<.03)):
             out['hard_block']=True;out['blockers'].append('price_effectively_at_circuit_limit')
+        out['policy']='V685_GROWW_LIVE_SPREAD_CIRCUIT_AND_DISPLAYED_DEPTH_EXECUTION_GATE'
         return out
     except Exception as exc:
         out['detail']=str(exc)[:180];return out
-
 
 def _merge_permission(ready:Dict[str,Any], permission:Dict[str,Any])->Dict[str,Any]:
     merged=dict(ready)
@@ -117,7 +150,7 @@ def create_preview(rec_id:str)->Dict[str,Any]:
     meta=instrument(rec["symbol"]);tick=float((meta or {}).get("tick_size") or .05)
     px=live_prices([rec["symbol"]]).get(rec["symbol"],float(rec["current_price"])) if rec.get("exchange")=="NSE" else float(rec["current_price"])
     plan=order_plan(rec["side"],float(px),tick,stop_price=float(rec.get('stop_price') or 0) or None)
-    quality=_quote_execution_quality(rec['symbol'],rec['side'],float(px)) if rec.get('exchange')=='NSE' else {'status':'UNSUPPORTED','hard_block':True,'blockers':['venue_not_supported_by_groww']}
+    quality=_quote_execution_quality(rec['symbol'],rec['side'],float(px),int(plan.get('quantity') or 0)) if rec.get('exchange')=='NSE' else {'status':'UNSUPPORTED','hard_block':True,'blockers':['venue_not_supported_by_groww']}
     if quality.get('hard_block'):
         ready=dict(ready);ready['blockers']=list(dict.fromkeys((ready.get('blockers') or [])+(quality.get('blockers') or [])));ready['ready']=False
     permission={"ready":False,"blockers":["base_execution_readiness_failed"],"policy":"V670_EXECUTION_INTEGRITY_PRETRADE"}
@@ -143,7 +176,7 @@ def execute_preview(token:str)->Dict[str,Any]:
     if datetime.now(IST)>datetime.fromisoformat(d["expires_at"]):raise ValueError("Preview expired")
     payload=json.loads(d["payload_json"]);rec=_rec(d["recommendation_id"]);ready=execution_readiness(rec)
     plan=payload["plan"]
-    quality=_quote_execution_quality(rec['symbol'],rec['side'],float(rec.get('current_price') or payload.get("decision_price") or 0))
+    quality=_quote_execution_quality(rec['symbol'],rec['side'],float(rec.get('current_price') or payload.get("decision_price") or 0),int(plan.get('quantity') or 0))
     if quality.get('hard_block'):
         ready['blockers']=list(dict.fromkeys((ready.get('blockers') or [])+(quality.get('blockers') or [])));ready['ready']=False
     if int(plan["quantity"])<1:raise RuntimeError("Risk/notional caps are below one share at the current protected limit price")
