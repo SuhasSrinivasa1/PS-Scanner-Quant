@@ -4,7 +4,7 @@ from datetime import time
 from zoneinfo import ZoneInfo
 
 APP_NAME = "PS Scanner Quant"
-VERSION = "6.8.3"
+VERSION = "6.8.4"
 IST = ZoneInfo("Asia/Kolkata")
 HOST = "127.0.0.1"
 PORT = 8765
