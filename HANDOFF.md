@@ -1,8 +1,18 @@
 # PS Scanner handoff
 
-Current source version: **6.8.4**.
+Current source version: **6.8.5**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.5 professional evidence completion
+
+v6.8.5 audits the requested professional analyst / institutional-flow capabilities against the actual current code. It carries forward the v6.8.0 shared evidence fabric, FII/DII + large-deal context, OBV/CMF/MFI accumulation features, institutional Challenger strategy and adaptive algorithm rather than duplicating them.
+
+The release adds a centrally paced NIFTY benchmark-history producer so scanner relative strength is consistently benchmarked; point-in-time NSE security-delivery, PIT Regulation 7(2), and relevant corporate-announcement evidence; bounded priority Groww option-chain/F&O positioning; prospective institutional-ownership change telemetry; and an execution-only displayed market-depth quantity gate. Newly wired delivery/disclosure/derivatives/sector-proxy evidence remains shadow/advisory and excluded from live scoring until incremental out-of-sample value is demonstrated.
+
+Historical data before capture began is not fabricated. Full historical Level-2 depth, universal Indian sector-index mapping, broader macro-event coverage, and a separate commercial advisory onboarding/suitability/compliance platform remain explicit gaps.
+
+See `RELEASE_v6.8.5.md` and `ARCHITECTURE_AUDIT_v6.8.5.md`.
 
 ## v6.8.4 bounded full-breadth runtime contention
 
