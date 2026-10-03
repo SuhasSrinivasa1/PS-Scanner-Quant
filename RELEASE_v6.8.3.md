@@ -25,3 +25,7 @@ A dedicated regression test verifies:
 - stale v6.8.1 acceptance checks cannot reappear silently.
 
 The v6.8.2 production attempt that exposed this defect had already completed all 274 tests successfully before the stale post-launch gate rejected the service.
+
+## Canonical repository
+
+Canonical source: `SuhasSrinivasa1/PS-Scanner-Quant`. The prior monorepo is retained only as historical backup.
