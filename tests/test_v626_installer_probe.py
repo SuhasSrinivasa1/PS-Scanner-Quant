@@ -15,8 +15,11 @@ class V625InstallerProbeTests(unittest.TestCase):
         self.assertIn("/api/groww/status", paths)
 
     def test_health_stays_cached_nonblocking(self):
-        text = (ROOT / "psscanner_quant" / "main.py").read_text()
-        self.assertIn('"groww":broker.status_cached()', text)
+        main_text = (ROOT / "psscanner_quant" / "main.py").read_text()
+        snapshot_text = (ROOT / "psscanner_quant" / "health_snapshot.py").read_text()
+        self.assertIn('"groww":snap.get("groww")', main_text)
+        self.assertNotIn('"groww":broker.status_cached()', main_text)
+        self.assertIn("groww=broker.status_cached()", snapshot_text)
 
     def test_independent_broker_probe_worker_exists(self):
         text = (ROOT / "psscanner_quant" / "engine.py").read_text()
