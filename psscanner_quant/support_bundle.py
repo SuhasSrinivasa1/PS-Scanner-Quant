@@ -172,7 +172,11 @@ def latest_support_bundle_path()->Path|None:
 
 
 def build_support_bundle()->tuple[bytes,str]:
-    """Compatibility/testing helper; production HTTP downloads use the prebuilt file."""
+    """Compatibility/testing helper for SERVICE_LOGS_PLUS_SANITIZED_RUNTIME_AUDIT_EXPORT.
+
+    The production HTTP route serves the prebuilt file. The compatibility builder
+    preserves contains_credentials=False semantics and never includes settings files.
+    """
     tmp=_EXPORT_DIR/"PS_Scanner_Logs_compat.zip"
     out=_build_to_path(tmp)
     payload=tmp.read_bytes()
