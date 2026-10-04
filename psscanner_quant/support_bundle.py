@@ -164,9 +164,7 @@ def prime_support_bundle()->Dict[str,Any]:
 
 def support_bundle_status()->Dict[str,Any]:
     with _LOCK:
-        out=dict(_STATUS)
-    out["exists"]=_LATEST_PATH.exists()
-    return out
+        return dict(_STATUS)
 
 
 def latest_support_bundle_path()->Path|None:
