@@ -78,7 +78,7 @@ class V6810PassiveUIViewTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         install=(root/"install.sh").read_text()
         prime=install.index("refresh_performance, refresh_international")
-        launch=install.index('launchctl bootstrap "gui/$(id -u)" "$PLIST"')
+        launch=install.rindex('launchctl bootstrap "gui/$(id -u)" "$PLIST"')
         self.assertLess(prime,launch)
         self.assertIn("refresh_support_bundle",install)
 
