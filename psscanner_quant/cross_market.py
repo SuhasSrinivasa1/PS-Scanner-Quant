@@ -176,6 +176,7 @@ def _start_global_india_job(now:datetime,target,week_key:str,g:Dict[str,Any],set
                 "industry":row.get("industry") or "UNKNOWN",
                 "cue":float(possible.get("cue") or 0),
                 "combined":float(possible.get("combined") or 0),
+                "calibration":float(calibration.get(side) or 0),
                 "drivers":list(possible.get("evidence") or []),
             })
     items.sort(key=lambda x:(-float(x.get("upper_bound") or 0),str(x.get("side")),str(x.get("symbol"))))
@@ -243,7 +244,7 @@ def build_global_india_board() -> Dict[str,Any]:
         if aligned<=0.12:continue
         trend=float(f.get('trend') or 0);trend_ok=sign*trend>=0
         adx=float(f.get('adx14') or 0);atr=max(.15,float(f.get('atr_pct') or 1.0))
-        calibration=_calibration_adjustment(side)
+        calibration=float(item.get("calibration") or 0)
         score=68+min(16,aligned*9)+(7 if trend_ok else -4)+min(7,adx/8)+calibration
         if score<78:continue
         target_pct=max(.55,min(3.0,atr*1.15+min(1.0,abs(combined))*.35))
