@@ -510,6 +510,10 @@ def run_international_cycle():
     existing=_freeze_contract_count('INTERNATIONAL',week_key)
     append_cap=_append_discovery_capacity('INTERNATIONAL',week_key,now)
     append_mode=bool(existing>=required and not preweek and min(append_cap.get('remaining_total',0),append_cap.get('remaining_today',0))>0)
+    # Historical preparation contracts remain true: AFTER_FRIDAY_CLOSE_TO_MONDAY_OPEN
+    # and PREWEEK_OR_RECOVERY_RECENT_DAILY_CLOSE describe the data window. v6.8.9
+    # adds append-only in-week discovery without daily replacement.
+    max_longs=required
     stats={'book':'INTERNATIONAL','started_at':now_iso(),'session':session,'week_key':week_key,'inserted':0,'updated_or_closed':0,
            'side_policy':'LONG_ONLY','holding_policy':'INITIAL_FREEZE_PLUS_APPEND_ONLY_NO_REPLACEMENT',
            'contract_required':required,'preferred_freeze_deadline_ist':'MONDAY_09:00','append_mode':append_mode,
@@ -567,7 +571,7 @@ def run_international_cycle():
         edge=max(0.0,geom['capacity_pct']*min(1.05,max(.65,score/100.0))*.58-reserve)
         candidates.append((edge,score,sym,px,f,candles,ti,geom,age))
     need=max(0,required-existing)
-    take=min(need,required) if not append_mode else min(append_cap.get('remaining_total',0),append_cap.get('remaining_today',0))
+    take=min(need,max_longs) if not append_mode else min(append_cap.get('remaining_total',0),append_cap.get('remaining_today',0))
     made=0
     for rank,(edge,score,sym,px,f,candles,ti,geom,age) in enumerate(sorted(candidates,key=lambda x:(x[0],x[1]),reverse=True)[:take],start=existing+1):
         rationale={'reasons':['frozen U.S. weekly LONG opportunity','completed daily trend and multi-week momentum','ranked by expected net weekly edge after turnover/friction reserve'],
@@ -575,7 +579,7 @@ def run_international_cycle():
             'freeze_policy':'V689_MONDAY_0900_INITIAL_PLUS_APPEND_ONLY','week_key':week_key,'remaining_sessions':geom['remaining_sessions'],'capacity_pct':geom['capacity_pct'],
             'cost_reserve_pct':geom['cost_reserve_pct'],'expected_net_target_pct':geom['expected_net_target_pct'],'expected_net_weekly_edge_pct':round(edge,4),
             'weekly_rank':rank,'daily_bar_age_days':age,'selection_objective':'MAX_EXPECTED_NET_WEEKLY_RETURN_AMONG_DATA_VALID_US_UNIVERSE',
-            'turnover_policy':'ONE_IDENTITY_PER_SYMBOL_PER_WEEK_NO_REPLACEMENT','target_is_not_guaranteed':True,
+            'turnover_policy':'ONE_FROZEN_ENTRY_PER_SYMBOL_PER_WEEK_NO_REPLACEMENT','target_is_not_guaranteed':True,
             'selection_phase':'APPEND_DISCOVERY' if append_mode else 'INITIAL_FREEZE','initial_frozen_slate_preserved':True,'append_only':True}
         rid=_insert_rec('INTERNATIONAL',sym,'LONG',score,.78,px,f,'US_WEEKLY',['US_WEEKLY_TREND','US_WEEKLY_MOMENTUM','US_WEEKLY_LOW_TURNOVER'],rationale,exchange='US',target_pct_override=geom['target_pct'],stop_pct_override=geom['stop_pct'],period_key_override=week_key)
         if rid:made+=1
