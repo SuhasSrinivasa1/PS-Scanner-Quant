@@ -225,7 +225,7 @@ from psscanner_quant.passive_views import refresh_performance, refresh_internati
 from psscanner_quant.support_bundle import refresh_support_bundle
 perf=refresh_performance()
 intl=refresh_international()
-bundle=refresh_support_bundle()
+bundle=refresh_support_bundle(force=True)
 print("Passive performance cache:", perf)
 print("Passive International view:", intl)
 print("Prebuilt support export:", {k:bundle.get(k) for k in ("ready","size_bytes","elapsed_ms","last_error")})
