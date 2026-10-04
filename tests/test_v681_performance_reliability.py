@@ -96,10 +96,12 @@ class V681PerformanceReliabilityTests(unittest.TestCase):
         self.assertTrue(callable(news_context.set_state))
 
     def test_global_india_calibration_is_read_once_per_side_per_cycle(self):
-        src = inspect.getsource(cross_market.build_global_india_board)
-        self.assertIn("calibration={side:_calibration_adjustment(side)", src)
-        self.assertIn("+calibration[side]", src)
-        self.assertEqual(src.count("_calibration_adjustment("), 1)
+        start_src = inspect.getsource(cross_market._start_global_india_job)
+        build_src = inspect.getsource(cross_market.build_global_india_board)
+        self.assertIn("calibration={side:_calibration_adjustment(side)", start_src)
+        self.assertEqual(start_src.count("_calibration_adjustment("), 1)
+        self.assertIn('calibration=float(item.get("calibration") or 0)', build_src)
+        self.assertNotIn("_calibration_adjustment(", build_src)
 
     def test_passive_health_worker_snapshot_is_db_free(self):
         src = inspect.getsource(enginemod.Engine.worker_status_cached)
