@@ -180,6 +180,8 @@ def health():
         "performance_reliability_patch":{"version":"6.8.1","name":"BOUNDED_PERFORMANCE_ANALYTICS",
             "api_db_timeout_seconds":.5,"api_query_budget_seconds":2.5,"network_calls":False,
             "single_snapshot":True,"narrow_projection":True,"deep_learning_uses_passive_budget":False},
+        "recovery_execution_patch":{"version":"6.4.9","name":"RECOVERY_EXECUTION_AND_PREPERIOD_FREEZE",
+            "gate_relaxation":False,"static_ip_policy":"EXECUTION_ONLY"},
         "health_snapshot_patch":{"version":"6.8.9","name":"BACKGROUND_DB_SNAPSHOT_PASSIVE_HEALTH",
             "request_path_db_connections":0,"background_refresh":True,"fail_closed_without_snapshot":True},
         "professional_evidence_patch":{"version":"6.8.9","name":"BOOK_SPECIFIC_TANDEM_EVIDENCE_COMBINATIONS",
