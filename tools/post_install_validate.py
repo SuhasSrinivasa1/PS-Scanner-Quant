@@ -8,6 +8,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+ROOT=Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0,str(ROOT))
 from psscanner_quant.constants import VERSION
 
 BASE="http://127.0.0.1:8765"
