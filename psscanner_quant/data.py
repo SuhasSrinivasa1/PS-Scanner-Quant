@@ -491,17 +491,29 @@ def _request_history_window(groww_symbol: str, interval: str, start: datetime, e
 
 
 def _history_summary_values(interval: str, candles: List[Any]) -> tuple[int,List[float]]:
-    rows=len(candles or []);closes:List[float]=[]
-    if str(interval).lower()=="1day":
-        for row in reversed(candles or []):
-            fields=_candle_fields(row)
-            if not fields:continue
-            close=_number(fields[4])
-            if close is None or close<=0:continue
-            closes.append(float(close))
-            if len(closes)>=60:break
-        closes.reverse()
-    return rows,closes
+    """Return parser-equivalent valid row count and the last 60 daily closes.
+
+    The compact summary is allowed to avoid pandas, but Global->India pruning depends on
+    its close-only ret20/trend matching the authoritative detailed parser. Apply the same
+    H/L/C validity, timestamp coercion, sorting and duplicate-last semantics here.
+    """
+    if str(interval).lower()!="1day":
+        return len(candles or []),[]
+    valid:Dict[str,tuple[Any,float]]={}
+    for row in candles or []:
+        fields=_candle_fields(row)
+        if not fields:continue
+        ts,_,h,l,cl,_=fields
+        try:
+            idx=_coerce_candle_timestamp(ts)
+            high=_number(h);low=_number(l);close=_number(cl)
+            if None in (high,low,close):continue
+            valid[idx.isoformat()]=(idx,float(close))
+        except Exception:
+            continue
+    ordered=sorted(valid.values(),key=lambda x:x[0])
+    closes=[float(x[1]) for x in ordered[-60:]]
+    return len(ordered),closes
 
 
 def _upsert_history_summary(path: Path, symbol: str, interval: str, candles: List[Any]) -> None:
