@@ -30,6 +30,7 @@ from .trading_calendar import (period_end_date as exchange_period_end_date, rema
 from .sector_context import context as sector_context, context_cached as sector_context_cached, prime_cache as prime_sector_cache
 from .event_calendar import risk_context as event_risk_context, refresh_symbol_event, seed_official_calendar
 from .evidence_fabric import publish as fabric_publish, priority_symbols as fabric_priority_symbols, symbol_context as fabric_symbol_context
+from .health_snapshot import refresh as refresh_health_db_snapshot
 from .institutional_intelligence import refresh as institutional_refresh
 from .production_integrity import (
     common_audit_context, make_audit_envelope, record_scan_run, seed_release_experiment, maybe_daily_backup,
@@ -1491,6 +1492,9 @@ class Engine:
         t.start()
         return t
 
+    def _health_snapshot_refresh(self):
+        refresh_health_db_snapshot()
+
     def _maintenance(self):
         settings=load_settings()
         # Low-priority universe rotation. Scanners never wait for this worker.
@@ -1659,6 +1663,7 @@ class Engine:
             ("broker_probe",float(settings.get("broker_probe_interval_seconds",300)),self._broker_probe,1),
             ("execution_integrity",float(settings.get("execution_integrity_worker_interval_seconds",120)),self._execution_integrity,6),
             ("backup_integrity",float(settings.get("backup_worker_interval_seconds",3600)),self._backup_integrity,120),
+            ("health_snapshot",float(settings.get("health_snapshot_worker_interval_seconds",5)),self._health_snapshot_refresh,1),
             ("universe_refresh",float(settings.get("universe_refresh_interval_seconds",1800)),self._universe_refresh,2),
             ("market_snapshot",float(settings.get("full_breadth_ltp_interval_seconds",180)),self._market_snapshot,3),
             ("priority_quotes",float(settings.get("live_update_interval_seconds",60)),self._priority_quote_refresh,3),
