@@ -19,7 +19,7 @@ from .db import db, health, get_state, set_state, now_iso
 from .broker import broker
 from .engine import (_insert_rec, _observe, _publish_frozen, period_key, _target_feasibility, _risk_geometry,
     _period_has_valid_frozen_book, _horizon_freeze_window, _freeze_contract_min, _freeze_contract_count,
-    _horizon_target_context)
+    _horizon_target_context, _append_discovery_capacity, _publish_append_discoveries)
 from .regime import classify
 from .global_context import snapshot as global_snapshot
 from .trade_intelligence import evaluate as evaluate_trade_intelligence
@@ -144,9 +144,16 @@ def run_etf_cycle():
     ctx=_horizon_target_context('ETF',now);pk=str(ctx['period_key']);target_now=ctx.get('target_now') or now;preperiod=bool(ctx.get('preperiod'))
     required=_freeze_contract_min('ETF') or 5;existing=_freeze_contract_count('ETF',pk)
     if existing>=required:
-        contract={'required':required,'published_total':existing,'shortage':0,'recovery_required':False}
-        set_state('scan_status_ETF',{'book':'ETF','running':False,'status':'PERIOD_BOOK_ALREADY_FROZEN','period_key':pk,'contract':contract,'target_period':ctx,'at':now_iso()})
-        return 0
+        appended=0;cap=_append_discovery_capacity('ETF',pk,now)
+        if min(cap.get('remaining_total',0),cap.get('remaining_today',0))>0 and is_regular_trading_day(now.date()) and MARKET_OPEN<=t<=HORIZON_RECOVERY_END:
+            c=scan_etfs(sides=('LONG',),target_now=target_now);_observe('ETF',c,period_key_override=pk)
+            appended=_publish_append_discoveries('ETF',period_key_override=pk,publication_anchor=datetime.now(IST))
+            cap=_append_discovery_capacity('ETF',pk,datetime.now(IST))
+        contract={'required':required,'published_total':existing+appended,'shortage':0,'recovery_required':False,
+                  'initial_slate_immutable':True,'append_only':True,'append_capacity':cap}
+        set_state('scan_status_ETF',{'book':'ETF','running':False,'status':'PERIOD_BOOK_FROZEN_APPEND_ONLY','period_key':pk,
+            'contract':contract,'target_period':ctx,'appended_this_cycle':appended,'at':now_iso()})
+        return appended
 
     normal_research=is_regular_trading_day(now.date()) and HORIZON_RESEARCH_START<=t<=HORIZON_RECOVERY_END
     missed_freeze_recovery=_etf_missed_freeze_recovery_allowed(now,existing,required,preperiod)
