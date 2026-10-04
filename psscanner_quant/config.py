@@ -75,6 +75,7 @@ _DEFAULTS: Dict[str, Any] = {
     "circuit_nextday_worker_interval_seconds": 60,
     "international_worker_interval_seconds": 120,
     "global_india_worker_interval_seconds": 300,
+    "global_india_detail_budget_seconds": 180,
     "strategy_worker_interval_seconds": 600,
     "circuit_scan_size": 40,
     "circuit_live_max_per_side": 3,
