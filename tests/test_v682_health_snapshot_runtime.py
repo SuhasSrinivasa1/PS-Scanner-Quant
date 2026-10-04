@@ -19,7 +19,7 @@ class V682HealthSnapshotRuntimeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.8")
+        self.assertEqual(VERSION, "6.8.9")
 
     def test_health_prioritizes_execution_snapshot_before_optional_telemetry(self):
         src = inspect.getsource(main.health)
