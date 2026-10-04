@@ -1231,6 +1231,8 @@ def run_single_horizon_cycle(book: str):
     required=_freeze_contract_min(book) or 5
     existing=_freeze_contract_count(book,pk)
     if existing>=required:
+        # PERIOD_BOOK_ALREADY_FROZEN remains the identity invariant; v6.8.9 may run
+        # a separate stricter append-discovery scan without replacing that frozen slate.
         appended=_run_horizon_append_cycle(book,now,pk,target_now) if not preperiod else 0
         state={"open":False,"status":"PERIOD_BOOK_FROZEN_APPEND_ONLY","period_key":pk,"required":required,"published_total":existing+appended,"shortage":0,
                "preperiod":preperiod,"initial_slate_immutable":True,"append_only":True,"append_capacity":_append_discovery_capacity(book,pk,now)}
