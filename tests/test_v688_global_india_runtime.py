@@ -2,7 +2,8 @@ import inspect
 import unittest
 from unittest.mock import patch
 
-from psscanner_quant import cross_market as cm
+from psscanner_quant import cross_market as cm, data
+from psscanner_quant.features import latest_features
 from psscanner_quant.constants import VERSION
 
 
@@ -47,13 +48,32 @@ class V688GlobalIndiaRuntimeTests(unittest.TestCase):
         self.assertEqual(board["runtime"]["summary_evaluated"],200)
         self.assertEqual(board["runtime"]["detail_parsed"],0)
 
+    def test_compact_summary_close_sequence_matches_authoritative_parser(self):
+        candles=[]
+        for i in range(65):
+            day=f"2026-07-{(i%28)+1:02d}T00:00:00+05:30"
+            px=100.0+i
+            candles.append([day,px-1,px+2,px-2,px,1000+i])
+        # Last duplicate wins in both paths; an invalid HLC row is ignored in both paths.
+        candles.append(["2026-07-10T00:00:00+05:30",150,152,148,151,2000])
+        candles.append(["2026-09-30T00:00:00+05:30",150,None,148,151,2000])
+        rows,closes=data._history_summary_values("1day",candles)
+        df=data._parse_candles(candles)
+        self.assertEqual(rows,len(df))
+        self.assertEqual(closes,[float(x) for x in df["close"].tolist()[-60:]])
+        sf=cm._global_india_summary_features({"daily_rows":rows,"recent_closes":closes})
+        df_last=latest_features(df)
+        self.assertAlmostEqual(sf["ret20"],df_last["ret20"],places=10)
+        self.assertAlmostEqual(sf["trend"],df_last["trend"],places=10)
+
     def test_full_breadth_is_screened_without_top_n_slice(self):
+        start_src=inspect.getsource(cm._start_global_india_job)
         src=inspect.getsource(cm.build_global_india_board)
-        self.assertIn("history_summary_snapshot(syms)",src)
+        self.assertIn("history_summary_snapshot(syms)",start_src)
         self.assertIn("summary_evaluated",src)
-        self.assertNotIn("syms[:",src)
-        self.assertIn("time.sleep(0)",src)
-        self.assertIn("FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP",src)
+        self.assertNotIn("syms[:",start_src)
+        self.assertIn("time.sleep(0)",start_src)
+        self.assertIn("FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP",src)
 
 
 if __name__ == "__main__":
