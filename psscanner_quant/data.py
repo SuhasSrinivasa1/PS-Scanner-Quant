@@ -530,10 +530,18 @@ def history_summary_snapshot(symbols: Optional[Iterable[str]]=None) -> Dict[str,
     out:Dict[str,Dict[str,Any]]={}
     try:
         with db(timeout_seconds=.5) as con:
-            rs=con.execute(
-                "SELECT symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at "
-                "FROM history_summaries WHERE interval IN ('1day','5minute')"
-            ).fetchall()
+            if wanted and len(wanted)<=400:
+                marks=",".join("?" for _ in wanted)
+                rs=con.execute(
+                    "SELECT symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at "
+                    f"FROM history_summaries WHERE interval IN ('1day','5minute') AND symbol IN ({marks})",
+                    tuple(sorted(wanted)),
+                ).fetchall()
+            else:
+                rs=con.execute(
+                    "SELECT symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at "
+                    "FROM history_summaries WHERE interval IN ('1day','5minute')"
+                ).fetchall()
         for r in rs:
             sym=str(r[0] or "").upper()
             if wanted and sym not in wanted:continue
