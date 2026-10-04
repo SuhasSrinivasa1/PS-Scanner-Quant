@@ -142,7 +142,7 @@ def _build_to_path(path:Path)->Dict[str,Any]:
         "compression_ratio":round(ratio,4) if ratio is not None else None,
         "compression":"DEFLATE_LEVEL_1",
         "log_files":log_count,"table_rows":table_counts,
-        "policy":"BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6811",
+        "policy":"BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6812",
     }
 
 
