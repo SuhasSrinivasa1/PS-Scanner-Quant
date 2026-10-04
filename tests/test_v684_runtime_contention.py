@@ -9,7 +9,7 @@ from psscanner_quant.constants import VERSION
 
 class V684RuntimeContentionTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.10")
+        self.assertEqual(VERSION, "6.8.11")
 
     def test_full_nse_ltp_has_hard_wall_clock_budget(self):
         b = GrowwBroker()
