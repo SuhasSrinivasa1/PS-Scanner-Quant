@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from psscanner_quant import db as dbmod, main
+from psscanner_quant import db as dbmod, main, health_snapshot
 from psscanner_quant.constants import VERSION
 
 
@@ -21,18 +21,21 @@ class V682HealthSnapshotRuntimeTests(unittest.TestCase):
     def test_version(self):
         self.assertEqual(VERSION, "6.8.9")
 
-    def test_health_prioritizes_execution_snapshot_before_optional_telemetry(self):
-        src = inspect.getsource(main.health)
-        order_pos = src.index("SELECT COUNT(*) FROM orders")
-        state_pos = src.index("SELECT key,value_json FROM system_state")
-        decision_pos = src.index("SELECT decision,COUNT(*) FROM trade_decisions")
-        fundamental_pos = src.index("FROM fundamental_snapshots")
+    def test_background_health_snapshot_prioritizes_execution_and_http_is_db_free(self):
+        producer = inspect.getsource(health_snapshot.refresh)
+        order_pos = producer.index("SELECT COUNT(*) FROM orders")
+        state_pos = producer.index("SELECT key,value_json FROM system_state")
+        decision_pos = producer.index("SELECT decision,COUNT(*) FROM trade_decisions")
+        fundamental_pos = producer.index("FROM fundamental_snapshots")
         self.assertLess(order_pos, decision_pos)
         self.assertLess(state_pos, decision_pos)
         self.assertLess(order_pos, fundamental_pos)
+        src = inspect.getsource(main.health)
         self.assertIn('"execution_snapshot_available":order_count is not None', src)
         self.assertIn('"health_snapshot_patch"', src)
         self.assertIn('"static_ip_policy":"EXECUTION_ONLY"', src)
+        self.assertIn('"request_path_db_connections":0', src)
+        self.assertNotIn("with db(",src)
 
     def test_recent_decision_health_query_uses_time_leading_index(self):
         with dbmod.db() as con:
