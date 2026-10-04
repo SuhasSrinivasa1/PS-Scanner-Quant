@@ -10,7 +10,7 @@ expiry, recovery and learning semantics from one source instead of stale page co
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
-POLICY_VERSION = "V689_APPEND_ONLY_TANDEM_EVIDENCE_LIFECYCLE"
+POLICY_VERSION = "V680_SHARED_EVIDENCE_FABRIC_ADAPTIVE_ALGORITHM"
 
 BOOK_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "INTRADAY": {
