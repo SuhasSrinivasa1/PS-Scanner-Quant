@@ -17,7 +17,7 @@ class V687PassiveAlgorithmCacheTests(unittest.TestCase):
             inst._SUMMARY_CACHE.clear()
 
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.9")
+        self.assertEqual(VERSION, "6.8.10")
 
     def test_institutional_summary_drops_deep_arrays(self):
         deep={
