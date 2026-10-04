@@ -1511,6 +1511,7 @@ class Engine:
         explicit={"international":120.0,"broker_probe":90.0,"live_update":180.0,"market_snapshot":240.0,
                   "intraday":900.0,"weekly":1200.0,"monthly":1200.0,"etf":900.0,
                   "circuit":600.0,"circuit_nextday":300.0,"global_india":600.0,
+                  "international_view":120.0,"performance_view":300.0,"support_bundle":900.0,
                   # Low-priority maintenance legitimately performs a paced multi-request
                   # history hydration batch; 360s was below its existing transport envelope.
                   "maintenance":900.0}
@@ -1609,6 +1610,18 @@ class Engine:
 
     def _health_snapshot_refresh(self):
         refresh_health_db_snapshot()
+
+    def _international_view_refresh(self):
+        from .passive_views import refresh_international
+        refresh_international()
+
+    def _performance_view_refresh(self):
+        from .passive_views import refresh_performance
+        refresh_performance()
+
+    def _support_bundle_refresh(self):
+        from .support_bundle import refresh_support_bundle
+        refresh_support_bundle()
 
     def _maintenance(self):
         settings=load_settings()
@@ -1779,6 +1792,9 @@ class Engine:
             ("execution_integrity",float(settings.get("execution_integrity_worker_interval_seconds",120)),self._execution_integrity,6),
             ("backup_integrity",float(settings.get("backup_worker_interval_seconds",3600)),self._backup_integrity,120),
             ("health_snapshot",float(settings.get("health_snapshot_worker_interval_seconds",5)),self._health_snapshot_refresh,1),
+            ("international_view",float(settings.get("international_view_worker_interval_seconds",15)),self._international_view_refresh,8),
+            ("performance_view",float(settings.get("performance_view_worker_interval_seconds",60)),self._performance_view_refresh,30),
+            ("support_bundle",float(settings.get("support_bundle_worker_interval_seconds",300)),self._support_bundle_refresh,180),
             ("universe_refresh",float(settings.get("universe_refresh_interval_seconds",1800)),self._universe_refresh,2),
             ("market_snapshot",float(settings.get("full_breadth_ltp_interval_seconds",180)),self._market_snapshot,3),
             ("priority_quotes",float(settings.get("live_update_interval_seconds",60)),self._priority_quote_refresh,3),
