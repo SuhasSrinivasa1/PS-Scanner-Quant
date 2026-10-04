@@ -220,6 +220,22 @@ algo=refresh()
 print("Algorithm passive cache:", {"cache_ready":algo.get("cache_ready"),"algorithm_version":algo.get("algorithm_version"),
                                   "institutional_status":(algo.get("institutional_intelligence") or {}).get("status")})
 PYAC
+./.venv/bin/python - <<'PYPASSIVE'
+from psscanner_quant.passive_views import refresh_performance, refresh_international
+from psscanner_quant.support_bundle import refresh_support_bundle
+perf=refresh_performance()
+intl=refresh_international()
+bundle=refresh_support_bundle()
+print("Passive performance cache:", perf)
+print("Passive International view:", intl)
+print("Prebuilt support export:", {k:bundle.get(k) for k in ("ready","size_bytes","elapsed_ms","last_error")})
+if perf.get("ready") is not True:
+    raise SystemExit("Passive performance cache prime failed")
+if intl.get("ready") is not True:
+    raise SystemExit("Passive International view prime failed")
+if bundle.get("ready") is not True:
+    raise SystemExit("Support export prime failed")
+PYPASSIVE
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF
