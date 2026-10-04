@@ -1649,6 +1649,8 @@ class Engine:
     def _supervise(self):
         try:
             refresh_instruments();refresh_universe();seed_library();seed_official_calendar();seed_release_experiment();prime_sector_cache()
+            from .trading_algorithm import prime_cache as prime_algorithm_cache
+            prime_algorithm_cache()
         except Exception as exc:
             self.last_error=str(exc)[:300];health("bootstrap","ERROR",self.last_error)
         settings=load_settings()
