@@ -1,8 +1,22 @@
 # PS Scanner handoff
 
-Current source version: **6.8.11**.
+Current source version: **6.8.12**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.12 bounded Global→India and passive support delivery
+
+The real-Mac v6.8.11 upgrade succeeded: 333 local tests passed, passive caches primed, Groww explicit verification returned CONNECTED, and the application started as 6.8.11 with preserved runtime state. Health remained passive during stress testing with zero request-path DB connections, subsystem refreshes and filesystem reads.
+
+Acceptance still correctly failed. Global→India had evaluated all 3,390 NSE summaries but admitted 2,286 detailed candidates and exceeded its 600-second worker watchdog. The compressed support bundle reduced roughly 401.8 MB of retained content to 47.1 MB, but the live refresh took roughly 561 seconds and the 10-second localhost download transferred only about 10.6 MB.
+
+v6.8.12 keeps the full-NSE summary pass and replaces the unbounded detailed stage with bounded resumable branch-and-bound. Pruning uses conservative maximum final scores and parser-equivalent compact close sequences; an incomplete pass never publishes or freezes a partial board.
+
+The support bundle remains background-built and sanitized. Successful compressed bytes are preloaded into memory, the request serves that immutable payload with zero request-path filesystem reads, and fresh completed archives are not repeatedly rebuilt merely because a compression cycle exceeded the nominal worker interval. The installer still forces one fresh build while the old service is stopped.
+
+No trading, evidence, risk, breadth, lifecycle, identity, Static-IP or strategy-promotion rule changes.
+
+See `RELEASE_v6.8.12.md` and `ARCHITECTURE_AUDIT_v6.8.12.md`.
 
 ## v6.8.11 acceptance-gate and compressed-export fix
 
