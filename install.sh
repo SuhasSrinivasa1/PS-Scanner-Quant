@@ -207,6 +207,10 @@ rm -rf .venv
 ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python -m compileall -q psscanner_quant
 ./.venv/bin/python -m unittest discover -s tests -v
+./.venv/bin/python - <<'PYHS'
+from psscanner_quant.data import backfill_history_summaries
+print("History summary backfill:", backfill_history_summaries())
+PYHS
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF
