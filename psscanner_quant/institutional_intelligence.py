@@ -111,8 +111,8 @@ def _parse_large_deals(payload:Any)->List[Dict[str,Any]]:
             sym=str(r.get("symbol") or r.get("tradingSymbol") or r.get("security") or "").upper()
             if not sym:continue
             side=str(r.get("buySell") or r.get("buy_sell") or r.get("side") or r.get("transactionType") or "").upper()
-            qty=_f(r.get("quantity") if r.get("quantity") is not None else r.get("qty"))
-            px=_f(r.get("price") if r.get("price") is not None else r.get("tradePrice"))
+            qty=_f(_pick(r,"quantity","qty"))
+            px=_f(_pick(r,"price","tradePrice","watp","WATP","weightedAveragePrice"))
             client=str(r.get("clientName") or r.get("client") or r.get("name") or "")
             out.append({"symbol":sym,"kind":kind,"side":side,"quantity":qty,"price":px,
                         "value_rupees":round(qty*px,2) if qty and px else None,"client":client[:160],"raw":r})
