@@ -1,8 +1,20 @@
 # PS Scanner handoff
 
-Current source version: **6.8.6**.
+Current source version: **6.8.7**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.7 passive adaptive-algorithm cache
+
+The real Mac v6.8.6 upgrade succeeded: SHA/integrity checks passed, 298 local tests passed, the 4,869-file history-summary backfill completed in about 5.6 seconds, Groww remained CONNECTED, and the application started as 6.8.6. Full-NSE breadth reached CURRENT for all 3,390 equities. The v6.8.6 WATP correction also worked in production: the institutional producer was READY, 163 returned large-deal rows carried a usable price, delivery covered 3,262 securities, F&O positioning completed without exhausting its wall-clock budget, and there were no institutional producer errors.
+
+The production acceptance gate still failed for a different reason. `GET /api/algorithm` timed out repeatedly. The route called `trading_algorithm.status()`, which rebuilt `snapshot(record=False)` inline; that snapshot embedded `institutional_intelligence.cached_status()`, i.e. the full deep institutional payload including thousands of delivery rows and hundreds of large deals. A client timeout does not necessarily cancel the synchronous server-side thread, so validator retries could stack several expensive algorithm builds. The subsequent direct performance call then reached the unchanged 2.5-second fail-closed budget after only 26 CLOSED rows, and health's optional DB snapshot was interrupted near its budget even though `market_snapshot` was IDLE and not hung.
+
+v6.8.7 makes `/api/algorithm` a pure passive cached view. The deep institutional producer now also emits a bounded summary state; algorithm snapshots embed only that summary. The installer backfills the compact institutional summary from the last persisted deep snapshot and precomputes the algorithm cache while the service is stopped. FastAPI primes that persisted cache synchronously before starting the engine, and subsequent algorithm recomputation happens only in background workers. The validator now requires `cache_ready=true`, `passive_cached=true`, no network calls, and no deep institutional payload.
+
+No passive timeout is increased. No full-NSE breadth cap, scanner cadence reduction, risk relaxation, Static-IP scope change, frozen-book identity change, evidence fabrication, or automatic promotion of shadow evidence is introduced.
+
+See `RELEASE_v6.8.7.md` and `ARCHITECTURE_AUDIT_v6.8.7.md`.
 
 ## v6.8.6 persisted history-summary runtime hardening
 
