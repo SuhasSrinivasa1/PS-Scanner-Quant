@@ -1,14 +1,18 @@
 # PS Scanner Quant v6.8.9
 
-v6.8.9 is the current public-repository release candidate. Real-Mac v6.8.6 proved the persisted history-summary and WATP fixes, but also exposed a separate passive-API defect: `/api/algorithm` rebuilt and serialized the complete adaptive snapshot inline, including the deep institutional dataset. Client timeouts could leave multiple expensive server-side requests running and then starve otherwise bounded `/api/performance` and `/api/health` calls. v6.8.7 makes algorithm status a precomputed compact cache, primes it while the service is stopped, and keeps deep institutional evidence exclusively on its dedicated endpoint. All v6.8.6 breadth/history fixes and trading/risk/frozen-identity invariants remain intact.
+v6.8.9 is the current public-repository release candidate and the final product-integration pass after the real-Mac v6.8.8 run.
+
+The release closes the last observed passive-health contention by making /api/health DB-free on its request path and sharing the compact full-NSE history-summary observation across background consumers. It also adds one-click sanitized **Export All Logs**, book-specific tandem evidence profiles, immutable initial Weekly/Monthly/ETF/International slates with strictly gated append-only discoveries, and a weekly Global→India prediction ledger. Institutional evidence remains confirmation/context rather than a standalone trade trigger. Indian SHORT execution remains same-day MIS with the 15:00 IST hard exit.
+
+Initial weekly slates target Monday 09:00 IST; Monthly targets 09:00 IST on the first NSE trading day. Missed-freeze recovery remains deterministic and gate-preserving. Later discoveries can add identities only under a higher-conviction plus CONFIRMED/STRONG tandem-evidence gate; earlier recommendations never disappear or get rank-replaced.
 
 See:
 - `RELEASE_v6.8.9.md`
 - `ARCHITECTURE_AUDIT_v6.8.9.md`
+- `RELEASE_v6.8.8.md`
+- `ARCHITECTURE_AUDIT_v6.8.8.md`
 - `RELEASE_v6.8.7.md`
 - `ARCHITECTURE_AUDIT_v6.8.7.md`
-- `RELEASE_v6.8.6.md`
-- `ARCHITECTURE_AUDIT_v6.8.6.md`
 
 # PS Scanner Quant v6.8.1 — Bounded Performance Analytics Reliability
 
