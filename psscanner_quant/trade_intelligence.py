@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from .constants import IST, MARKET_OPEN, INTRADAY_ENTRY_CUTOFF, TRADE_NOTIONAL_RUPEES
 from .handbook import filter_catalog
+from .evidence_policy import combination_profile
 
 _GROUPS={
     'Market regime and cross-market context':'MARKET',
@@ -260,8 +261,10 @@ def evaluate(*, book:str, symbol:str, side:str, features:Dict[str,Any], fundamen
     if data_confidence<.55:hard_blockers.append(f'Data confidence too low: {data_confidence:.2f}')
     threshold={'INTRADAY':62,'WEEKLY':67,'MONTHLY':70,'ETF':65,'CIRCUIT':68,'INTERNATIONAL':64}.get(book,65)
     decision='NO_TRADE' if hard_blockers else ('ELIGIBLE' if score>=threshold else 'WATCH')
+    evidence_combination=combination_profile(book,side,f,institutional_ctx,news,global_ctx,sector_ctx,candle_info,fundamentals)
     return {
         'decision':decision,'score':round(score,2),'minimum_score':threshold,'hard_blockers':hard_blockers,
+        'evidence_combination':evidence_combination,
         'shadow_evidence':{
             'delivery':institutional_ctx.get('delivery_evidence'),
             'insider_transactions':list(institutional_ctx.get('insider_transactions') or [])[:5],
