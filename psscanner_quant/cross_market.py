@@ -142,7 +142,7 @@ def build_global_india_board() -> Dict[str,Any]:
     detail_plan={}
     summary_ready=0
     for idx,sym in enumerate([str(x or '').upper() for x in syms if x],1):
-        if idx%64==0:time.sleep(0)
+        if idx%16==0:time.sleep(0)
         summary=summaries.get(sym) or {}
         if int(summary.get("daily_rows") or 0)>=60:summary_ready+=1
         row=meta.get(sym,{})
@@ -156,7 +156,7 @@ def build_global_india_board() -> Dict[str,Any]:
 
     candidates=[];detail_parsed=0
     for idx,(sym,plan) in enumerate(detail_plan.items(),1):
-        if idx%8==0:time.sleep(0)
+        time.sleep(0)
         try:df=history(sym,'1day',allow_network=False)
         except Exception:continue
         if len(df)<60:continue
