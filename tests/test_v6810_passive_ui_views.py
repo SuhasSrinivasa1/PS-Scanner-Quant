@@ -70,12 +70,14 @@ class V6810PassiveUIViewTests(unittest.TestCase):
         self.assertIn('"support_bundle"',src)
 
     def test_global_india_yields_cooperatively_without_breadth_cap(self):
+        start_src=inspect.getsource(cross_market._start_global_india_job)
         src=inspect.getsource(cross_market.build_global_india_board)
-        self.assertIn("full_nse_symbols()",src)
-        self.assertNotIn("syms[:",src)
-        self.assertIn("time.sleep(0)",src)
+        self.assertIn("full_nse_symbols()",start_src)
+        self.assertNotIn("syms[:",start_src)
+        self.assertIn("time.sleep(0)",start_src)
         self.assertIn("FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP",src)
         self.assertIn("partial_rows_published",src)
+        self.assertIn("BOUNDED_CONTINUATION_PENDING",src)
 
     def test_installer_primes_caches_before_launch(self):
         root=Path(__file__).resolve().parents[1]
