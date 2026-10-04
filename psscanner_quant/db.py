@@ -365,6 +365,17 @@ CREATE TABLE IF NOT EXISTS institutional_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_institutional_time ON institutional_snapshots(captured_at DESC);
 
+CREATE TABLE IF NOT EXISTS history_summaries (
+  symbol TEXT NOT NULL,
+  interval TEXT NOT NULL,
+  row_count INTEGER NOT NULL DEFAULT 0,
+  recent_closes_json TEXT NOT NULL DEFAULT '[]',
+  cache_mtime_ns INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(symbol, interval)
+);
+CREATE INDEX IF NOT EXISTS idx_history_summaries_interval ON history_summaries(interval, symbol);
+
 CREATE TABLE IF NOT EXISTS algorithm_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   algorithm_version TEXT NOT NULL,

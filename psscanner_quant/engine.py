@@ -14,7 +14,7 @@ from .config import load_settings
 from .constants import (IST, VERSION, MARKET_OPEN, MARKET_CLOSE, INTRADAY_ENTRY_CUTOFF, SHORT_HARD_EXIT,
     HORIZON_RESEARCH_START, HORIZON_FREEZE_START, HORIZON_FREEZE_END, HORIZON_RECOVERY_END,
     HORIZON_PUBLISH_START, HORIZON_PUBLISH_END)
-from .data import (bootstrap_history, warm_intraday_history, warm_daily_history, cached_history_coverage, history, liquidity_rank, live_prices, refresh_live_price_cache, refresh_instruments, refresh_universe, universe, full_nse_symbols, full_breadth_discovery_snapshot, universe_status, _history_path, _load_raw_candles)
+from .data import (bootstrap_history, warm_intraday_history, warm_daily_history, cached_history_coverage, history, liquidity_rank, live_prices, refresh_live_price_cache, refresh_instruments, refresh_universe, universe, full_nse_symbols, full_breadth_discovery_snapshot, history_summary_snapshot, universe_status, _history_path, _load_raw_candles)
 from .db import db, get_state, health, now_iso, set_state
 from .features import latest_features
 from .candle_patterns import detect_patterns
@@ -27,7 +27,7 @@ from .regime import classify
 from .strategy_library import active_strategies, score_strategy, seed_library
 from .trading_calendar import (period_end_date as exchange_period_end_date, remaining_sessions as exchange_remaining_sessions,
     is_regular_trading_day, next_trading_day, first_trading_day_of_week, first_trading_day_of_month)
-from .sector_context import context as sector_context, context_cached as sector_context_cached
+from .sector_context import context as sector_context, context_cached as sector_context_cached, prime_cache as prime_sector_cache
 from .event_calendar import risk_context as event_risk_context, refresh_symbol_event, seed_official_calendar
 from .evidence_fabric import publish as fabric_publish, priority_symbols as fabric_priority_symbols, symbol_context as fabric_symbol_context
 from .institutional_intelligence import refresh as institutional_refresh
@@ -1525,10 +1525,12 @@ class Engine:
         syms=full_nse_symbols()
         self._set_worker_stage("market_snapshot","LTP_REFRESH")
         prices=refresh_live_price_cache(syms) if syms else {}
+        self._set_worker_stage("market_snapshot","HISTORY_SUMMARY")
+        summaries=history_summary_snapshot(syms)
         self._set_worker_stage("market_snapshot","BREADTH_DISCOVERY")
-        breadth=full_breadth_discovery_snapshot(prices)
+        breadth=full_breadth_discovery_snapshot(prices,summaries=summaries)
         self._set_worker_stage("market_snapshot","REGIME_CLASSIFICATION")
-        state=classify(prices=prices,allow_network_prices=False)
+        state=classify(prices=prices,allow_network_prices=False,summaries=summaries)
         self._set_worker_stage("market_snapshot","PUBLISH")
         set_state("market_snapshot_status",{"at":now_iso(),"symbols":len(syms),"prices":len(prices),
             "breadth_evaluated":breadth.get("evaluated",0),"regime":state.get("regime"),
@@ -1646,7 +1648,7 @@ class Engine:
 
     def _supervise(self):
         try:
-            refresh_instruments();refresh_universe();seed_library();seed_official_calendar();seed_release_experiment()
+            refresh_instruments();refresh_universe();seed_library();seed_official_calendar();seed_release_experiment();prime_sector_cache()
         except Exception as exc:
             self.last_error=str(exc)[:300];health("bootstrap","ERROR",self.last_error)
         settings=load_settings()

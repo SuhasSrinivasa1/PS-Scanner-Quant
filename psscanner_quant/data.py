@@ -488,8 +488,121 @@ def _request_history_window(groww_symbol: str, interval: str, start: datetime, e
     return [], _http_status(last_exc) if last_exc else 0, last_exc
 
 
+def _history_summary_values(interval: str, candles: List[Any]) -> tuple[int,List[float]]:
+    rows=len(candles or []);closes:List[float]=[]
+    if str(interval).lower()=="1day":
+        for row in reversed(candles or []):
+            fields=_candle_fields(row)
+            if not fields:continue
+            close=_number(fields[4])
+            if close is None or close<=0:continue
+            closes.append(float(close))
+            if len(closes)>=60:break
+        closes.reverse()
+    return rows,closes
+
+
+def _upsert_history_summary(path: Path, symbol: str, interval: str, candles: List[Any]) -> None:
+    """Keep a compact SQLite history index synchronized with the authoritative JSON cache.
+
+    The full-breadth/regime/sector workers read this summary instead of reparsing
+    thousands of candle JSON files every few minutes. The JSON cache remains the source
+    of truth for detailed scanners and backtests.
+    """
+    try:
+        rows,closes=_history_summary_values(interval,candles)
+        mtime_ns=int(path.stat().st_mtime_ns) if path.exists() else 0
+        with db(timeout_seconds=.75) as con:
+            con.execute(
+                "INSERT INTO history_summaries(symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(symbol,interval) DO UPDATE SET "
+                "row_count=excluded.row_count,recent_closes_json=excluded.recent_closes_json,"
+                "cache_mtime_ns=excluded.cache_mtime_ns,updated_at=excluded.updated_at",
+                (str(symbol).upper(),str(interval).lower(),rows,json.dumps(closes,separators=(",",":")),mtime_ns,now_iso()),
+            )
+    except Exception as exc:
+        health("history_summary","WARN",f"{symbol} {interval}: {str(exc)[:180]}")
+
+
+def history_summary_snapshot(symbols: Optional[Iterable[str]]=None) -> Dict[str,Dict[str,Any]]:
+    """Read one compact snapshot for full-breadth consumers with no candle-file parsing."""
+    wanted={str(s).upper() for s in (symbols or []) if s}
+    out:Dict[str,Dict[str,Any]]={}
+    try:
+        with db(timeout_seconds=.5) as con:
+            if wanted and len(wanted)<=400:
+                marks=",".join("?" for _ in wanted)
+                rs=con.execute(
+                    "SELECT symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at "
+                    f"FROM history_summaries WHERE interval IN ('1day','5minute') AND symbol IN ({marks})",
+                    tuple(sorted(wanted)),
+                ).fetchall()
+            else:
+                rs=con.execute(
+                    "SELECT symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at "
+                    "FROM history_summaries WHERE interval IN ('1day','5minute')"
+                ).fetchall()
+        for r in rs:
+            sym=str(r[0] or "").upper()
+            if wanted and sym not in wanted:continue
+            rec=out.setdefault(sym,{"daily_rows":0,"intraday_rows":0,"recent_closes":[]})
+            interval=str(r[1] or "").lower();rows=int(r[2] or 0)
+            if interval=="1day":
+                rec["daily_rows"]=rows
+                try:rec["recent_closes"]=[float(x) for x in json.loads(r[3] or "[]") if x is not None][-60:]
+                except Exception:rec["recent_closes"]=[]
+            elif interval=="5minute":
+                rec["intraday_rows"]=rows
+            rec["updated_at"]=r[5]
+        return out
+    except Exception as exc:
+        health("history_summary","WARN",f"snapshot: {str(exc)[:180]}")
+        return {}
+
+
+def backfill_history_summaries() -> Dict[str,Any]:
+    """One-time/offline migration for existing JSON caches.
+
+    The installer runs this while the service is stopped so the first v6.8.6 market
+    snapshot does not pay the historical JSON decode cost under live API load.
+    """
+    from .db import init_db
+    init_db()
+    payload=[];files=0;started=time.monotonic();symbols=set()
+    candidates=[]
+    for interval in ("1day","5minute"):
+        suffix=f".{interval}.json"
+        for path in _CACHE.glob(f"*{suffix}"):
+            sym=path.name[:-len(suffix)].upper()
+            if sym:candidates.append((sym,interval,path));symbols.add(sym)
+    for sym,interval,path in candidates:
+        raw=_load_raw_candles(path);rows,closes=_history_summary_values(interval,raw)
+        payload.append((sym,interval,rows,json.dumps(closes,separators=(",",":")),int(path.stat().st_mtime_ns),now_iso()))
+        files+=1
+    if payload:
+        with db(timeout_seconds=30.0) as con:
+            con.execute("BEGIN")
+            try:
+                con.executemany(
+                    "INSERT INTO history_summaries(symbol,interval,row_count,recent_closes_json,cache_mtime_ns,updated_at) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(symbol,interval) DO UPDATE SET "
+                    "row_count=excluded.row_count,recent_closes_json=excluded.recent_closes_json,"
+                    "cache_mtime_ns=excluded.cache_mtime_ns,updated_at=excluded.updated_at",
+                    payload,
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK");raise
+    out={"symbols":len(symbols),"files_indexed":files,"rows":len(payload),
+         "elapsed_seconds":round(time.monotonic()-started,2),
+         "policy":"V686_OFFLINE_INSTALL_BACKFILL_RUNTIME_SUMMARY_INDEX"}
+    set_state("history_summary_backfill",out)
+    return out
+
+
 def _persist_history(path: Path, symbol: str, interval: str, candles: List[List[Any]]) -> pd.DataFrame:
     _atomic_json(path, {"symbol": symbol, "interval": interval, "fetched_at": now_iso(), "candles": candles})
+    _upsert_history_summary(path,symbol,interval,candles)
     return _parse_candles(candles)
 
 
@@ -722,40 +835,41 @@ def universe_status() -> Dict[str,Any]:
         "breadth_status":breadth_status,"live_price_refresh":ltp_status,
         "scan_policy":"FULL_BREADTH_DISCOVERY_NO_TOP_N_UNIVERSE_CAP"}
 
-def full_breadth_discovery_snapshot(prices: Optional[Dict[str,float]]=None) -> Dict[str,Any]:
-    """Cheap all-market pass over every NSE equity in the instrument master.
+def full_breadth_discovery_snapshot(prices: Optional[Dict[str,float]]=None,
+                                    summaries: Optional[Dict[str,Dict[str,Any]]]=None) -> Dict[str,Any]:
+    """Full-NSE breadth from compact persisted history summaries.
 
-    This is intentionally not a top-N selector. Every discovered stock is evaluated for
-    price displacement and data readiness; detailed strategy workers then use the richer
-    history available for each name. New/limited-history listings remain visible and are
-    prioritised for enrichment instead of disappearing from the universe.
+    Every discovered equity is still evaluated. v6.8.6 removes the repeated runtime
+    parsing of every daily and intraday candle file; detailed JSON histories remain
+    authoritative and update the summary index whenever they are refreshed.
     """
     syms=full_nse_symbols();prices=dict(prices or cached_live_prices(syms,max_age_seconds=600))
-    evaluated=0;daily_ready=0;intra_ready=0;limited=0;moves=[];missing_price=0
+    summaries=dict(history_summary_snapshot(syms) if summaries is None else summaries)
+    evaluated=0;daily_ready=0;intra_ready=0;limited=0;moves=[];missing_price=0;summary_ready=0
     for sym in syms:
-        evaluated+=1
-        draw=_load_raw_candles(_history_path(sym,"1day"));iraw=_load_raw_candles(_history_path(sym,"5minute"))
-        if len(draw)>=30:daily_ready+=1
+        evaluated+=1;rec=summaries.get(sym) or {}
+        daily_rows=int(rec.get("daily_rows") or 0);intra_rows=int(rec.get("intraday_rows") or 0)
+        closes=list(rec.get("recent_closes") or [])
+        if daily_rows>=30:daily_ready+=1
         else:limited+=1
-        if len(iraw)>=30:intra_ready+=1
-        prev=None
-        for row in reversed(draw):
-            f=_candle_fields(row)
-            if not f:continue
-            prev=_number(f[4])
-            if prev and prev>0:break
+        if intra_rows>=30:intra_ready+=1
+        if rec:summary_ready+=1
+        prev=float(closes[-1]) if closes else None
         px=prices.get(sym)
         if px is None:missing_price+=1
         elif prev and prev>0:
-            mv=(float(px)/prev-1.0)*100;moves.append((mv,sym,len(draw),len(iraw)))
+            mv=(float(px)/prev-1.0)*100;moves.append((mv,sym,daily_rows,intra_rows))
     moves.sort(key=lambda x:abs(x[0]),reverse=True)
     out={"at":now_iso(),"universe":len(syms),"evaluated":evaluated,"live_prices":len(prices),"missing_live_price":missing_price,
          "daily_history_ready":daily_ready,"intraday_history_ready":intra_ready,"new_or_limited_history":limited,
+         "summary_symbols_ready":summary_ready,
          "top_absolute_movers":[{"symbol":s,"move_pct":round(m,3),"daily_rows":dr,"intraday_rows":ir} for m,s,dr,ir in moves[:50]],
          "positive":sum(1 for m,_,_,_ in moves if m>0),"negative":sum(1 for m,_,_,_ in moves if m<0),
          "universe_source":"GROWW_NSE_EQUITY_SHARE_MASTER_V642","status":"CURRENT",
-         "policy":"EVERY_GROWW_NSE_EQUITY_SHARE_EVALUATED_NO_MARKET_CAP_LIQUIDITY_CAP"}
+         "history_source":"SQLITE_HISTORY_SUMMARY_INDEX",
+         "policy":"EVERY_GROWW_NSE_EQUITY_SHARE_EVALUATED_NO_MARKET_CAP_LIQUIDITY_CAP_NO_RUNTIME_FULL_CACHE_REPARSE"}
     set_state("full_breadth_discovery",out);return out
+
 
 def _activity_rank_full_breadth() -> List[str]:
     """Rank every discovered equity by live displacement from its last cached daily close.

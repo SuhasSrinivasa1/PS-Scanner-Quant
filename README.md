@@ -1,12 +1,12 @@
-# PS Scanner Quant v6.8.5
+# PS Scanner Quant v6.8.6
 
-v6.8.5 is the current public-repository release candidate. It audits the professional/institutional evidence requests against the current application, retains the v6.8.0 shared-evidence and institutional features that were already present, and closes the remaining implementable evidence gaps with cached NIFTY-relative strength, NSE deliverable-volume and PIT/regulatory disclosures, bounded Groww F&O positioning, and execution-only displayed market-depth controls. Newly wired research evidence is shadow-only until incremental OOS value is validated. v6.8.4 runtime-contention hardening and every trading/risk/frozen-identity invariant remain intact.
+v6.8.6 is the current public-repository release candidate. It fixes the remaining real-Mac startup contention seen after the successful v6.8.5 install by replacing repeated full-universe candle-JSON reparsing in market breadth, regime and sector context with a compact persisted history-summary index backfilled while the service is stopped. It also fixes NSE large-deal WATP normalization so disclosed bulk/block deal value is not silently lost. v6.8.5 professional evidence, v6.8.4 bounded LTP/runtime controls, and every trading/risk/frozen-identity invariant remain intact.
 
 See:
+- `RELEASE_v6.8.6.md`
+- `ARCHITECTURE_AUDIT_v6.8.6.md`
 - `RELEASE_v6.8.5.md`
 - `ARCHITECTURE_AUDIT_v6.8.5.md`
-- `RELEASE_v6.8.4.md`
-- `ARCHITECTURE_AUDIT_v6.8.4.md`
 
 # PS Scanner Quant v6.8.1 — Bounded Performance Analytics Reliability
 
