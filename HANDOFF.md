@@ -1,8 +1,18 @@
 # PS Scanner handoff
 
-Current source version: **6.8.5**.
+Current source version: **6.8.6**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.6 persisted history-summary runtime hardening
+
+The real Mac v6.8.5 install succeeded, all 290 local tests passed, Groww remained connected, and post-install validation returned `ok=true`. It also proved the v6.8.4 watchdog fix: `market_snapshot` was progressing in `BREADTH_DISCOVERY` and was not hung. A direct performance request made during that same startup workload still hit the 2.5-second fail-closed budget, however, while only 81 CLOSED rows had been loaded. Production evidence showed the remaining hot path: market breadth and regime still independently reparsed thousands of daily-history JSON files, while sector breadth performed additional cached-history feature work.
+
+v6.8.6 removes that repeated runtime decode cost. The installer backfills a compact SQLite `history_summaries` index while the service is stopped. Every subsequent history persistence keeps it current. Full-NSE breadth, regime classification and sector breadth consume the compact summary instead of reparsing all candle files. Detailed candle JSON remains authoritative for scanners, replay and learning. The same production audit also found NSE large-deal rows carrying price in `watp`; v6.8.6 normalizes WATP so value-weighted direct-deal evidence is retained.
+
+No full-NSE universe cap, scanner cadence reduction, risk relaxation, Static-IP scope change, frozen-book identity change, evidence backfill fabrication or automatic promotion of v6.8.5 shadow evidence is introduced.
+
+See `RELEASE_v6.8.6.md` and `ARCHITECTURE_AUDIT_v6.8.6.md`.
 
 ## v6.8.5 professional evidence completion
 
