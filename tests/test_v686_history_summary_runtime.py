@@ -74,7 +74,9 @@ class V686HistorySummaryRuntimeTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         src=(root/"install.sh").read_text()
         self.assertIn("backfill_history_summaries",src)
-        self.assertLess(src.index("backfill_history_summaries"),src.index("launchctl bootstrap"))
+        backfill=src.index("backfill_history_summaries")
+        launch_block=src.index('mkdir -p "$HOME/Library/LaunchAgents"',backfill)
+        self.assertLess(backfill,launch_block)
 
 
 if __name__ == "__main__":
