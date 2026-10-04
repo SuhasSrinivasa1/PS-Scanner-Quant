@@ -158,7 +158,7 @@ BOOK_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "db_table": "recommendations",
         "api_endpoint": "/api/international/board",
         "active_period": "current NSE week (period_key=Monday)",
-        "publication": "weekly bearish prediction research; any actual Indian short remains same-day MIS only",
+        "publication": "weekly bearish prediction research; SAME_DAY_MIS execution only with 15:00 IST hard exit",
         "freeze": "weekly research identity; later stronger candidates append only",
         "expiry": "week end for prediction evidence; execution still hard-exits by 15:00 IST",
         "recovery": "missed Monday freeze may self-heal; never convert to overnight short execution",
