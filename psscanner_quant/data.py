@@ -844,7 +844,7 @@ def full_breadth_discovery_snapshot(prices: Optional[Dict[str,float]]=None,
     authoritative and update the summary index whenever they are refreshed.
     """
     syms=full_nse_symbols();prices=dict(prices or cached_live_prices(syms,max_age_seconds=600))
-    summaries=dict(summaries or history_summary_snapshot(syms))
+    summaries=dict(history_summary_snapshot(syms) if summaries is None else summaries)
     evaluated=0;daily_ready=0;intra_ready=0;limited=0;moves=[];missing_price=0;summary_ready=0
     for sym in syms:
         evaluated+=1;rec=summaries.get(sym) or {}
