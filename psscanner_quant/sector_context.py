@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import statistics
 import time
+from datetime import datetime
 from threading import RLock
 from typing import Any, Dict, List
 
@@ -19,7 +20,10 @@ def prime_cache() -> Dict[str,Any]:
         state=get_state("sector_context_snapshot",{}) or {}
         snap=state.get("snapshot") if isinstance(state,dict) else {}
         if isinstance(snap,dict) and snap:
-            _CACHE["snapshot"]=dict(snap);_CACHE["at"]=time.time()
+            captured=state.get("captured_at")
+            try:captured_epoch=datetime.fromisoformat(str(captured)).timestamp()
+            except Exception:captured_epoch=0.0
+            _CACHE["snapshot"]=dict(snap);_CACHE["at"]=captured_epoch
     except Exception:
         pass
     return dict(_CACHE.get("snapshot") or {})
