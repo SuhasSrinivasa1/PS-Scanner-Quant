@@ -147,11 +147,18 @@ def health():
     started=time.monotonic();now=datetime.now(IST)
     market=is_regular_trading_day(now.date()) and MARKET_OPEN<=now.time().replace(tzinfo=None)<=MARKET_CLOSE
     snap=health_db_snapshot_status();state=dict(snap.get("state") or {})
-    order_count=snap.get("order_count")
+    snapshot_age=None
+    try:
+        refreshed=datetime.fromisoformat(str(snap.get("refreshed_at")))
+        refreshed=refreshed if refreshed.tzinfo else refreshed.replace(tzinfo=IST)
+        snapshot_age=max(0.0,(now-refreshed).total_seconds())
+    except Exception:pass
+    snapshot_fresh=bool(snap.get("ready") and snapshot_age is not None and snapshot_age<=20.0)
+    order_count=snap.get("order_count") if snapshot_fresh else None
     fundamentals=snap.get("fundamentals") or {"status":"WARMING","mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE"}
     events=snap.get("events") or {"status":"WARMING"}
     history_cached=history_control_status_cached()
-    execution_cached=execution_readiness_cached_snapshot(order_count,state.get("position_reconciliation") or {})
+    execution_cached=execution_readiness_cached_snapshot(order_count,(state.get("position_reconciliation") or {}) if snapshot_fresh else {})
     workers=engine.worker_status_cached()
     evidence={
         "fundamentals":fundamentals,
@@ -196,10 +203,14 @@ def health():
             "request_path_db_connections":0,"db_connections":0,
             "background_snapshot_ready":bool(snap.get("ready")),
             "background_snapshot_refreshed_at":snap.get("refreshed_at"),
+            "background_snapshot_age_seconds":round(snapshot_age,2) if snapshot_age is not None else None,
+            "background_snapshot_fresh":snapshot_fresh,
+            "background_snapshot_max_age_seconds":20.0,
             "background_snapshot_elapsed_ms":snap.get("elapsed_ms"),
             "background_snapshot_last_error":snap.get("last_error"),
             "db_snapshot_error":None if snap.get("ready") else (snap.get("last_error") or "health snapshot warming"),
             "execution_snapshot_available":order_count is not None,
+            "stale_snapshot_blocks_execution":True,
             "elapsed_ms":round((time.monotonic()-started)*1000.0,1)}}
 
 @app.get("/api/evidence/profiles")
