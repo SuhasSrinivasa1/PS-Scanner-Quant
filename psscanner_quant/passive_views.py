@@ -6,10 +6,12 @@ import os
 import threading
 import time
 from pathlib import Path
+from collections import defaultdict
 from typing import Any, Dict, Iterable
 
 from .constants import VERSION
-from .db import get_state, now_iso
+from .db import db, get_state, now_iso
+from .config import load_settings
 from .paths import DATA
 
 _PERF_PATH=DATA/"passive_performance_views.json"
@@ -71,14 +73,40 @@ def refresh_performance()->Dict[str,Any]:
     """Build all website performance groupings off-request from one DB snapshot."""
     started=time.monotonic();attempt=now_iso()
     try:
-        from .analytics import performance
+        from . import analytics as a
+        max_limit=max(PERFORMANCE_LIMITS)
+        columns=list(a._PERFORMANCE_BASE_COLUMNS)+["strategy_ids_json","feature_snapshot_json","rationale_json"]
+        sql=("SELECT "+",".join(columns)+" FROM recommendations INDEXED BY idx_recs_state_closed_perf_cover "
+             "WHERE state='CLOSED' ORDER BY COALESCE(closed_at,updated_at,created_at) ASC LIMIT ?")
+        with db(timeout_seconds=10.0) as con:
+            rows=[a.decode_recommendation(dict(r)) for r in con.execute(sql,(max_limit,)).fetchall()]
+            family_map=a._strategy_family_map(con)
         views={}
         for limit in PERFORMANCE_LIMITS:
+            subset=rows[:limit]
             for group_by in UI_PERFORMANCE_GROUPS:
-                out=performance(group_by=group_by,limit=limit,budget_seconds=None,db_timeout_seconds=10.0)
-                out["performance_contract"]={**(out.get("performance_contract") or {}),
-                    "background_precomputed":True,"passive_cached_source":True}
-                views[f"{group_by}|{limit}"]=out
+                grouped=defaultdict(list)
+                for row in subset:
+                    for key in a._group_keys(row,group_by,family_map):
+                        grouped[key].append(row)
+                groups=[a._group_stats(key,vals) for key,vals in grouped.items()]
+                if group_by in {"time_bucket","behavior_cluster"}:
+                    settings=load_settings();min_n=int(settings.get("cohort_min_samples_for_live_use",50) or 50);max_width=float(settings.get("cohort_max_wilson_width_for_live_use",.30) or .30)
+                    for item in groups:
+                        width=item.get("win_rate_wilson_width");expectancy=item.get("expectancy_pct");pf=item.get("profit_factor")
+                        eligible=bool((item.get("trading_count") or 0)>=min_n and width is not None and width<=max_width and expectancy is not None and expectancy>0 and pf is not None and pf>1.0)
+                        item["live_use_eligible"]=eligible
+                        item["live_use_gate"]={"minimum_samples":min_n,"maximum_wilson_width":max_width,"positive_expectancy_required":True,"profit_factor_gt_1_required":True,"automatic_activation":False}
+                groups.sort(key=lambda x:(x.get("trading_count") or 0,x.get("group") or ""),reverse=True)
+                views[f"{group_by}|{limit}"]={
+                    "generated_at":now_iso(),"book":None,"group_by":group_by,"status":"COMPLETE","complete":True,
+                    "rows_scanned":len(subset),"requested_limit":limit,"total":a._group_stats("ALL",subset),
+                    "groups":groups,"outcome_policy":a._outcome_policy(),
+                    "performance_contract":{"passive_cached":True,"background_precomputed":True,
+                        "request_path_db_connections":0,"producer_db_connections":1,"network_calls":False,
+                        "selected_index":"idx_recs_state_closed_perf_cover","partial_rows_published":False,
+                        "deep_learning_uses_passive_budget":False},
+                }
                 time.sleep(0)
         payload={"version":VERSION,"ready":True,"refreshed_at":now_iso(),"last_attempt_at":attempt,"last_error":None,
                  "elapsed_ms":round((time.monotonic()-started)*1000.0,1),"views":views,
