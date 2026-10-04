@@ -11,7 +11,7 @@ from psscanner_quant.constants import VERSION
 
 class V6811AcceptanceFixTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION,"6.8.11")
+        self.assertEqual(VERSION,"6.8.12")
 
     def test_validator_requires_new_passive_cache_contracts(self):
         root=Path(__file__).resolve().parents[1]
@@ -29,7 +29,7 @@ class V6811AcceptanceFixTests(unittest.TestCase):
         self.assertIn("ZIP_DEFLATED",src)
         self.assertIn("compresslevel=1",src)
         self.assertIn('"compression":"DEFLATE_LEVEL_1"',src)
-        self.assertIn("BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6811",src)
+        self.assertIn("BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6812",src)
 
     def test_repetitive_logs_are_materially_compressed_and_zip_is_valid(self):
         old_db=dbmod.DB_PATH

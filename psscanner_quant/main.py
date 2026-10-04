@@ -38,7 +38,7 @@ from .evidence_fabric import status as evidence_fabric_status
 from .institutional_intelligence import cached_status as institutional_status, point_in_time_history as institutional_history
 from .trading_algorithm import status as algorithm_status, history as algorithm_history, prime_cache as prime_algorithm_cache
 from .health_snapshot import status as health_db_snapshot_status, refresh as refresh_health_db_snapshot
-from .support_bundle import prime_support_bundle, latest_support_bundle_path, support_bundle_status
+from .support_bundle import prime_support_bundle, latest_support_bundle_payload, support_bundle_status
 from .passive_views import prime as prime_passive_views, cached_performance, cached_international, status as passive_view_status
 from .evidence_policy import profiles as evidence_profiles
 
@@ -241,11 +241,13 @@ def support_export_status():
 
 @app.get("/api/support/export")
 def support_export():
-    path=latest_support_bundle_path()
-    if path is None:
+    payload=latest_support_bundle_payload()
+    if payload is None:
         raise HTTPException(503,"Support bundle is warming; background producer has not completed a bundle yet.")
-    return FileResponse(path,media_type="application/zip",filename=f"PS_Scanner_Logs_{VERSION}.zip",
-                        headers={"Cache-Control":"no-store"})
+    return Response(content=payload,media_type="application/zip",
+                    headers={"Cache-Control":"no-store",
+                             "Content-Disposition":f'attachment; filename="PS_Scanner_Logs_{VERSION}.zip"',
+                             "X-PS-Scanner-Support-Source":"PREBUILT_MEMORY"})
 
 
 @app.get("/api/sanity")

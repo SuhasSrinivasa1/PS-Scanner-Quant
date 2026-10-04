@@ -32,6 +32,10 @@ DRIVER_RULES: List[Tuple[Tuple[str,...], Tuple[str,...]]] = [
 ]
 DEFAULT_DRIVERS=("SP500","NASDAQ","STOXX50","NIKKEI225","HANGSENG","USDINR")
 
+# One in-process resumable full-breadth job. The summary pass always sees the full NSE
+# universe; only mathematically dominated detailed candidates are skipped.
+_GLOBAL_INDIA_JOB:Dict[str,Any]={}
+
 
 def _target_trade_date(now:datetime|None=None):
     now=now or datetime.now(IST)
@@ -101,9 +105,10 @@ def _global_india_summary_features(summary:Dict[str,Any])->Dict[str,float]|None:
 
 
 def _global_india_score_ceiling(aligned:float, trend:float, side:str, calibration:float)->float:
-    sign=1 if str(side).upper()=="LONG" else -1
-    trend_ok=sign*float(trend)>=0
-    return 68+min(16,float(aligned)*9)+(7 if trend_ok else -4)+7+float(calibration)
+    # A true upper bound must grant the best possible trend contribution as well as
+    # the maximum ADX contribution. The summary trend is advisory here; detailed
+    # H/L/C validation may legitimately drop rows that the close-only summary retained.
+    return 68+min(16,float(aligned)*9)+7+7+float(calibration)
 
 
 def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
@@ -127,78 +132,179 @@ def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
     return {"sides":tuple(possible),"cue":cue,"evidence":evidence,"combined":combined}
 
 
-def build_global_india_board() -> Dict[str,Any]:
-    started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now);week_key=(now.date()-timedelta(days=now.weekday())).isoformat();g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
-    settings=load_settings();max_side=max(1,min(10,int(settings.get('global_india_max_per_side',5))))
+def _global_india_final_score_ceiling(base_ceiling:float)->float:
+    """Upper bound after the unchanged 80% base / 20% trade-intelligence blend."""
+    return .80*float(base_ceiling)+.20*100.0
+
+
+def _global_india_side_floor(candidates:List[Dict[str,Any]], side:str, max_side:int)->float|None:
+    scores=sorted((float(x.get("score") or 0) for x in candidates if x.get("side")==side),reverse=True)
+    return scores[max_side-1] if len(scores)>=max_side else None
+
+
+def _global_india_trim(candidates:List[Dict[str,Any]], max_side:int)->List[Dict[str,Any]]:
+    out=[]
+    for side in ("LONG","SHORT"):
+        rows=sorted((x for x in candidates if x.get("side")==side),key=lambda x:float(x.get("score") or 0),reverse=True)
+        out.extend(rows[:max_side])
+    return out
+
+
+def _start_global_india_job(now:datetime,target,week_key:str,g:Dict[str,Any],settings:Dict[str,Any])->Dict[str,Any]:
     syms=full_nse_symbols()
     meta={str(x.get('symbol') or '').upper():x for x in universe()}
     calibration={side:_calibration_adjustment(side) for side in ('LONG','SHORT')}
-
-    # v6.8.8: full breadth remains unconditional, but the first pass uses the compact
-    # persisted 60-close summary created in v6.8.6. No arbitrary Top-N cap is introduced.
-    # A symbol reaches detailed pandas/candle work iff it can mathematically still clear
-    # the existing score gate after granting the maximum possible ADX contribution.
+    moves=g.get('moves_pct') or {}
     summaries=history_summary_snapshot(syms)
-    detail_plan={}
-    summary_ready=0
+    items=[];summary_ready=0
     for idx,sym in enumerate([str(x or '').upper() for x in syms if x],1):
-        if idx%16==0:time.sleep(0)
+        if idx%32==0:time.sleep(0)
         summary=summaries.get(sym) or {}
         if int(summary.get("daily_rows") or 0)>=60:summary_ready+=1
         row=meta.get(sym,{})
         possible=_global_india_possible_sides(row,summary,moves,calibration)
-        if possible:detail_plan[sym]=possible
+        if not possible:continue
+        for side in possible.get("sides") or ():
+            sign=1 if side=="LONG" else -1
+            aligned=sign*float(possible.get("combined") or 0)
+            base_ceiling=_global_india_score_ceiling(
+                aligned,float((_global_india_summary_features(summary) or {}).get("trend") or 0),
+                side,float(calibration.get(side) or 0),
+            )
+            items.append({
+                "symbol":sym,"side":side,
+                "upper_bound":_global_india_final_score_ceiling(base_ceiling),
+                "industry":row.get("industry") or "UNKNOWN",
+                "cue":float(possible.get("cue") or 0),
+                "combined":float(possible.get("combined") or 0),
+                "calibration":float(calibration.get(side) or 0),
+                "drivers":list(possible.get("evidence") or []),
+            })
+    items.sort(key=lambda x:(-float(x.get("upper_bound") or 0),str(x.get("side")),str(x.get("symbol"))))
+    return {
+        "target_session":target.isoformat(),"week_key":week_key,
+        "global_context_generated_at":g.get("generated_at"),"global_context":g,
+        "items":items,"cursor":0,"candidates":[],"summary_evaluated":len(syms),
+        "summary_ready":summary_ready,"started_at":now_iso(),"detail_parsed":0,
+        "dominated_skips":0,"complete":False,
+        "policy":"FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP",
+    }
 
-    set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':True,'status':'DETAIL_ENRICHMENT',
-        'stage':'DETAIL_ENRICHMENT','summary_evaluated':len(syms),'summary_ready':summary_ready,
-        'detail_candidates':len(detail_plan),'target_session':target.isoformat(),'week_key':week_key,'at':now_iso(),
-        'policy':'FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP'})
 
-    candidates=[];detail_parsed=0
-    for idx,(sym,plan) in enumerate(detail_plan.items(),1):
+def build_global_india_board() -> Dict[str,Any]:
+    """Build the exact full-breadth board without allowing one worker cycle to run unbounded.
+
+    The full NSE summary pass is unconditional. Detailed history is evaluated in descending
+    mathematical score-ceiling order. Once a side already has max_side exact candidates,
+    an unevaluated symbol whose *maximum possible* final score cannot beat that floor is
+    safely skipped. If the wall-clock budget expires, the exact same job resumes next cycle;
+    no partial board is published or frozen.
+    """
+    global _GLOBAL_INDIA_JOB
+    invocation_started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now)
+    week_key=(now.date()-timedelta(days=now.weekday())).isoformat()
+    settings=load_settings();max_side=max(1,min(10,int(settings.get('global_india_max_per_side',5))))
+    budget=max(15.0,min(240.0,float(settings.get("global_india_detail_budget_seconds",180.0) or 180.0)))
+    g=get_state('global_context',{}) or {}
+
+    job=dict(_GLOBAL_INDIA_JOB or {})
+    same_job=bool(job and not job.get("complete") and job.get("target_session")==target.isoformat() and job.get("week_key")==week_key)
+    if not same_job:
+        job=_start_global_india_job(now,target,week_key,g,settings)
+        _GLOBAL_INDIA_JOB=job
+
+    items=list(job.get("items") or [])
+    candidates=list(job.get("candidates") or [])
+    cursor=int(job.get("cursor") or 0);parsed_this_cycle=0;skipped_this_cycle=0
+    deadline=time.monotonic()+budget
+    global_ctx=dict(job.get("global_context") or g)
+
+    set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':True,'status':'DETAIL_ENRICHMENT_BOUNDED',
+        'stage':'DETAIL_ENRICHMENT','summary_evaluated':job.get("summary_evaluated"),'summary_ready':job.get("summary_ready"),
+        'detail_candidates':len(items),'detail_cursor':cursor,'detail_remaining':max(0,len(items)-cursor),
+        'target_session':target.isoformat(),'week_key':week_key,'at':now_iso(),
+        'policy':'FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP'})
+
+    while cursor<len(items):
+        if time.monotonic()>=deadline:break
+        item=items[cursor];cursor+=1
+        side=str(item.get("side") or "");floor=_global_india_side_floor(candidates,side,max_side)
+        if floor is not None and float(item.get("upper_bound") or 0)<=floor+1e-9:
+            skipped_this_cycle+=1
+            continue
+        sym=str(item.get("symbol") or "")
         time.sleep(0)
         try:df=history(sym,'1day',allow_network=False)
         except Exception:continue
         if len(df)<60:continue
-        detail_parsed+=1
+        parsed_this_cycle+=1
         f=latest_features(df);px=float(f.get('close') or 0)
         if px<=0:continue
-        row=meta.get(sym,{})
-        labels=_drivers(str(row.get('industry') or 'UNKNOWN'));cue,evidence=_driver_score(labels,moves)
-        if not evidence:continue
-        own=float(f.get('ret20') or 0)/20.0
-        trend=float(f.get('trend') or 0)
+        combined=float(item.get("combined") or 0);sign=1 if side=='LONG' else -1
+        aligned=sign*combined
+        if aligned<=0.12:continue
+        trend=float(f.get('trend') or 0);trend_ok=sign*trend>=0
         adx=float(f.get('adx14') or 0);atr=max(.15,float(f.get('atr_pct') or 1.0))
-        combined=.68*cue+.32*own
-        for side in plan.get("sides") or ():
-            sign=1 if side=='LONG' else -1
-            aligned=sign*combined
-            if aligned<=0.12:continue
-            trend_ok=sign*trend>=0
-            score=68+min(16,aligned*9)+(7 if trend_ok else -4)+min(7,adx/8)+calibration[side]
-            if score<78:continue
-            target_pct=max(.55,min(3.0,atr*1.15+min(1.0,abs(combined))*.35))
-            stop_pct=max(.35,min(1.8,target_pct/1.6))
-            fund=fundamentals_get(sym,allow_refresh=False)
-            shared=fabric_symbol_context(sym,book='GLOBAL_INDIA',side=side,features=f,fundamentals=fund)
-            ti=evaluate_trade_intelligence(
-                book='GLOBAL_INDIA',symbol=sym,side=side,features=f,fundamentals=fund,
-                regime_state={'regime':'GLOBAL_OVERNIGHT','trend_vote':0.0,'breadth_up_pct':50.0,'breadth_down_pct':50.0},
-                candle_info={},news=shared['news'],global_ctx=g,portfolio={},
-                sector_ctx=shared['sector'],event_ctx=shared['events'],institutional_ctx=shared['institutional'],
-                target_pct=target_pct,stop_pct=stop_pct,
-                strategy_ids=['GLOBAL_SECTOR_CUE','GLOBAL_CROSS_ASSET','INDIA_DAILY_CONFIRM'],
-                data_confidence=max(.55,min(.90,.60+min(20,len(evidence))*.01)),
-            )
-            if ti.get('decision')=='NO_TRADE':continue
-            score=.80*score+.20*float(ti.get('score') or 0)
-            candidates.append({'symbol':sym,'side':side,'score':round(score,2),'confidence':round(max(.52,min(.84,.55+abs(combined)*.08+min(20,len(evidence))*0.005)),3),'price':px,'features':f,'fundamentals':fund,'industry':row.get('industry') or 'UNKNOWN','driver_cue_pct':round(cue,3),'combined_cue_pct':round(combined,3),'drivers':evidence,'target_pct':round(target_pct,4),'stop_pct':round(stop_pct,4),'target_date':target.isoformat(),'trade_intelligence':ti,'institutional_context':shared['institutional'],'evidence_fabric_policy':shared['fabric_policy']})
-    candidates.sort(key=lambda x:x['score'],reverse=True)
-    runtime={'summary_evaluated':len(syms),'summary_ready':summary_ready,'detail_candidates':len(detail_plan),
-             'detail_parsed':detail_parsed,'detail_parse_ratio':round(detail_parsed/max(1,len(syms)),4),
-             'cooperative_yield':True,'elapsed_seconds':round(time.monotonic()-started,2),
-             'policy':'FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP'}
-    board={'generated_at':now_iso(),'target_session':target.isoformat(),'freeze_time_ist':'09:00','state':'FROZEN' if is_regular_trading_day(now.date()) and now.date()==target and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME else 'PROVISIONAL_OVERNIGHT','long':[x for x in candidates if x['side']=='LONG'][:max_side],'short':[x for x in candidates if x['side']=='SHORT'][:max_side],'global_context_generated_at':g.get('generated_at'),'global_coverage':g.get('coverage',len(moves)),'policy':'GLOBAL_MARKETS_TO_INDIA_WEEKLY_PREDICTION_DAILY_EVIDENCE_V689','week_key':week_key,'universe_scanned':len(syms),'runtime':runtime}
+        calibration=float(item.get("calibration") or 0)
+        score=68+min(16,aligned*9)+(7 if trend_ok else -4)+min(7,adx/8)+calibration
+        if score<78:continue
+        target_pct=max(.55,min(3.0,atr*1.15+min(1.0,abs(combined))*.35))
+        stop_pct=max(.35,min(1.8,target_pct/1.6))
+        fund=fundamentals_get(sym,allow_refresh=False)
+        shared=fabric_symbol_context(sym,book='GLOBAL_INDIA',side=side,features=f,fundamentals=fund)
+        ti=evaluate_trade_intelligence(
+            book='GLOBAL_INDIA',symbol=sym,side=side,features=f,fundamentals=fund,
+            regime_state={'regime':'GLOBAL_OVERNIGHT','trend_vote':0.0,'breadth_up_pct':50.0,'breadth_down_pct':50.0},
+            candle_info={},news=shared['news'],global_ctx=global_ctx,portfolio={},
+            sector_ctx=shared['sector'],event_ctx=shared['events'],institutional_ctx=shared['institutional'],
+            target_pct=target_pct,stop_pct=stop_pct,
+            strategy_ids=['GLOBAL_SECTOR_CUE','GLOBAL_CROSS_ASSET','INDIA_DAILY_CONFIRM'],
+            data_confidence=max(.55,min(.90,.60+min(20,len(item.get("drivers") or []))*.01)),
+        )
+        if ti.get('decision')=='NO_TRADE':continue
+        score=.80*score+.20*float(ti.get('score') or 0)
+        candidates.append({'symbol':sym,'side':side,'score':round(score,2),
+            'confidence':round(max(.52,min(.84,.55+abs(combined)*.08+min(20,len(item.get("drivers") or []))*0.005)),3),
+            'price':px,'features':f,'fundamentals':fund,'industry':item.get("industry") or 'UNKNOWN',
+            'driver_cue_pct':round(float(item.get("cue") or 0),3),'combined_cue_pct':round(combined,3),
+            'drivers':list(item.get("drivers") or []),'target_pct':round(target_pct,4),'stop_pct':round(stop_pct,4),
+            'target_date':target.isoformat(),'trade_intelligence':ti,'institutional_context':shared['institutional'],
+            'evidence_fabric_policy':shared['fabric_policy']})
+        candidates=_global_india_trim(candidates,max_side)
+
+    job["cursor"]=cursor;job["candidates"]=candidates
+    job["detail_parsed"]=int(job.get("detail_parsed") or 0)+parsed_this_cycle
+    job["dominated_skips"]=int(job.get("dominated_skips") or 0)+skipped_this_cycle
+    complete=cursor>=len(items);job["complete"]=complete;_GLOBAL_INDIA_JOB=job
+    elapsed=round(time.monotonic()-invocation_started,2)
+    runtime={'summary_evaluated':job.get("summary_evaluated"),'summary_ready':job.get("summary_ready"),
+             'detail_candidates':len(items),'detail_cursor':cursor,'detail_remaining':max(0,len(items)-cursor),
+             'detail_parsed':job.get("detail_parsed"),'dominated_skips':job.get("dominated_skips"),
+             'cycle_detail_parsed':parsed_this_cycle,'cycle_dominated_skips':skipped_this_cycle,
+             'cooperative_yield':True,'elapsed_seconds':elapsed,'cycle_budget_seconds':budget,
+             'complete':complete,'partial_rows_published':False,
+             'policy':'FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP'}
+
+    if not complete:
+        set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':False,'status':'BOUNDED_CONTINUATION_PENDING',
+            'stage':'DETAIL_ENRICHMENT','summary_evaluated':job.get("summary_evaluated"),'summary_ready':job.get("summary_ready"),
+            'detail_candidates':len(items),'detail_cursor':cursor,'detail_remaining':max(0,len(items)-cursor),
+            'target_session':target.isoformat(),'week_key':week_key,'runtime':runtime,'at':now_iso(),
+            'policy':'FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP'})
+        previous=get_state('global_india_board',{}) or {}
+        return {**previous,"complete":False,"build_state":"BOUNDED_CONTINUATION_PENDING","runtime":runtime,
+                "target_session":target.isoformat(),"week_key":week_key}
+
+    candidates=_global_india_trim(candidates,max_side)
+    candidates.sort(key=lambda x:float(x.get('score') or 0),reverse=True)
+    board={'generated_at':now_iso(),'target_session':target.isoformat(),'freeze_time_ist':'09:00',
+           'state':'FROZEN' if is_regular_trading_day(now.date()) and now.date()==target and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME else 'PROVISIONAL_OVERNIGHT',
+           'long':[x for x in candidates if x['side']=='LONG'][:max_side],
+           'short':[x for x in candidates if x['side']=='SHORT'][:max_side],
+           'global_context_generated_at':job.get("global_context_generated_at"),
+           'global_coverage':global_ctx.get('coverage',len(global_ctx.get('moves_pct') or {})),
+           'policy':'GLOBAL_MARKETS_TO_INDIA_WEEKLY_PREDICTION_DAILY_EVIDENCE_V6812',
+           'week_key':week_key,'universe_scanned':job.get("summary_evaluated"),'complete':True,'runtime':runtime}
     set_state('global_india_board',board)
     return board
 
@@ -257,7 +363,10 @@ def freeze_global_india_board() -> int:
 
 def run_global_india_cycle() -> int:
     try:
-        board=build_global_india_board();made=freeze_global_india_board()
+        board=build_global_india_board()
+        if board.get("complete") is not True:
+            return 0
+        made=freeze_global_india_board()
         set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':False,'status':'OK','generated_at':board.get('generated_at'),'target_session':board.get('target_session'),'state':board.get('state'),'long':len(board.get('long') or []),'short':len(board.get('short') or []),'published':made,'runtime':board.get('runtime') or {},'at':now_iso()})
         return made
     except Exception as exc:

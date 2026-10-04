@@ -123,6 +123,8 @@ support=get("/api/support/export/status",timeout=3,attempts=3)
 if support.get("ready") is not True:fail("support export is not ready")
 if support.get("last_error"):fail("support export background build failed: "+str(support.get("last_error")))
 if support.get("compression")!="DEFLATE_LEVEL_1":fail("support export is not using background DEFLATE compression")
+if support.get("payload_ready") is not True:fail("support export memory payload is not ready")
+if support.get("request_path_filesystem_reads") != 0:fail("support export may read the filesystem on click")
 support_path=Path(str(support.get("path") or ""))
 if not support_path.exists():fail("support export file does not exist")
 try:
@@ -160,7 +162,9 @@ print(json.dumps({
     "performance_contract":perf_contract,
     "international_cache_contract":international_contract,
     "support_export":{"size_bytes":compressed,"uncompressed_size_bytes":uncompressed,
-                      "compression_ratio":support.get("compression_ratio"),"compression":support.get("compression")},
+                      "compression_ratio":support.get("compression_ratio"),"compression":support.get("compression"),
+                      "payload_ready":support.get("payload_ready"),"payload_bytes":support.get("payload_bytes"),
+                      "request_path_filesystem_reads":support.get("request_path_filesystem_reads")},
     "diagnostic_books":len(diag.get("books") or {}),
     "execution_orders_scanned":execution.get("orders_scanned"),
     "backup_policy":backups.get("policy"),

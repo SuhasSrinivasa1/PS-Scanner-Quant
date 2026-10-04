@@ -491,18 +491,18 @@ def _request_history_window(groww_symbol: str, interval: str, start: datetime, e
 
 
 def _history_summary_values(interval: str, candles: List[Any]) -> tuple[int,List[float]]:
-    rows=len(candles or []);closes:List[float]=[]
-    if str(interval).lower()=="1day":
-        for row in reversed(candles or []):
-            fields=_candle_fields(row)
-            if not fields:continue
-            close=_number(fields[4])
-            if close is None or close<=0:continue
-            closes.append(float(close))
-            if len(closes)>=60:break
-        closes.reverse()
-    return rows,closes
+    """Return parser-equivalent valid row count and the last 60 daily closes.
 
+    Global->India pruning requires its close-only ret20/trend to use exactly the same
+    ordered/deduplicated H/L/C-valid rows as the authoritative detailed parser.
+    """
+    if str(interval).lower()!="1day":
+        return len(candles or []),[]
+    df=_parse_candles(candles)
+    if df.empty:
+        return 0,[]
+    closes=[float(x) for x in df["close"].tolist()[-60:]]
+    return len(df),closes
 
 def _upsert_history_summary(path: Path, symbol: str, interval: str, candles: List[Any]) -> None:
     """Keep a compact SQLite history index synchronized with the authoritative JSON cache.

@@ -1621,6 +1621,16 @@ class Engine:
 
     def _support_bundle_refresh(self):
         from .support_bundle import refresh_support_bundle
+        # Compression is intentionally low priority. A real-Mac run showed a 16s
+        # stopped-service build stretching past nine minutes when it overlapped heavy
+        # research work. Defer rather than competing for CPU/I/O; the last complete
+        # sanitized archive remains available from memory.
+        heavy=("global_india","market_snapshot","maintenance","daily_history","institutional","strategy")
+        busy=[name for name in heavy if (self.worker_runtime.get(name) or {}).get("state")=="RUNNING"]
+        if busy:
+            set_state("support_bundle_refresh_deferred",{"at":now_iso(),"busy_workers":busy,
+                "policy":"LOW_PRIORITY_SUPPORT_REFRESH_NEVER_COMPETES_WITH_HEAVY_RESEARCH"})
+            return
         refresh_support_bundle()
 
     def _maintenance(self):

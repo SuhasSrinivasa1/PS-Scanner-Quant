@@ -2,13 +2,14 @@ import inspect
 import unittest
 from unittest.mock import patch
 
-from psscanner_quant import cross_market as cm
+from psscanner_quant import cross_market as cm, data
+from psscanner_quant.features import latest_features
 from psscanner_quant.constants import VERSION
 
 
 class V688GlobalIndiaRuntimeTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.11")
+        self.assertEqual(VERSION, "6.8.12")
 
     def test_summary_features_match_close_only_fields(self):
         closes=[100.0+i for i in range(60)]
@@ -47,13 +48,33 @@ class V688GlobalIndiaRuntimeTests(unittest.TestCase):
         self.assertEqual(board["runtime"]["summary_evaluated"],200)
         self.assertEqual(board["runtime"]["detail_parsed"],0)
 
+    def test_compact_summary_close_sequence_matches_authoritative_parser(self):
+        candles=[]
+        base=1_780_000_000
+        for i in range(65):
+            ts=base+i*86400
+            px=100.0+i
+            candles.append([ts,px-1,px+2,px-2,px,1000+i])
+        # Last duplicate wins in both paths; an invalid HLC row is ignored in both paths.
+        candles.append([base+10*86400,150,152,148,151,2000])
+        candles.append([base+70*86400,150,None,148,151,2000])
+        rows,closes=data._history_summary_values("1day",candles)
+        df=data._parse_candles(candles)
+        self.assertEqual(rows,len(df))
+        self.assertEqual(closes,[float(x) for x in df["close"].tolist()[-60:]])
+        sf=cm._global_india_summary_features({"daily_rows":rows,"recent_closes":closes})
+        df_last=latest_features(df)
+        self.assertAlmostEqual(sf["ret20"],df_last["ret20"],places=10)
+        self.assertAlmostEqual(sf["trend"],df_last["trend"],places=10)
+
     def test_full_breadth_is_screened_without_top_n_slice(self):
+        start_src=inspect.getsource(cm._start_global_india_job)
         src=inspect.getsource(cm.build_global_india_board)
-        self.assertIn("history_summary_snapshot(syms)",src)
+        self.assertIn("history_summary_snapshot(syms)",start_src)
         self.assertIn("summary_evaluated",src)
-        self.assertNotIn("syms[:",src)
-        self.assertIn("time.sleep(0)",src)
-        self.assertIn("FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP",src)
+        self.assertNotIn("syms[:",start_src)
+        self.assertIn("time.sleep(0)",start_src)
+        self.assertIn("FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP",src)
 
 
 if __name__ == "__main__":

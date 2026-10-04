@@ -19,7 +19,10 @@ _EXPORT_DIR=DATA/"support_exports"
 _LATEST_PATH=_EXPORT_DIR/"PS_Scanner_Logs_latest.zip"
 _STATUS_PATH=_EXPORT_DIR/"status.json"
 _LOCK=threading.RLock()
-_STATUS:Dict[str,Any]={"ready":False,"path":str(_LATEST_PATH),"generated_at":None,"last_error":"not yet built","elapsed_ms":None}
+_PAYLOAD:bytes|None=None
+_MIN_REFRESH_AGE_SECONDS=1800.0
+_STATUS:Dict[str,Any]={"ready":False,"path":str(_LATEST_PATH),"generated_at":None,"last_error":"not yet built","elapsed_ms":None,
+                       "payload_ready":False,"request_path_filesystem_reads":0,"min_refresh_age_seconds":_MIN_REFRESH_AGE_SECONDS}
 
 _EXPORTS={
     "health_events.jsonl":"SELECT * FROM health_events ORDER BY id",
@@ -139,17 +142,54 @@ def _build_to_path(path:Path)->Dict[str,Any]:
         "compression_ratio":round(ratio,4) if ratio is not None else None,
         "compression":"DEFLATE_LEVEL_1",
         "log_files":log_count,"table_rows":table_counts,
-        "policy":"BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6811",
+        "policy":"BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6812",
     }
 
 
-def refresh_support_bundle()->Dict[str,Any]:
-    """Refresh the downloadable archive in background; never block the web request."""
+def _generated_age_seconds(status:Dict[str,Any])->float|None:
+    raw=str((status or {}).get("generated_at") or "").strip()
+    if not raw:return None
     try:
+        from datetime import datetime
+        dt=datetime.fromisoformat(raw)
+        now=datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0,(now-dt).total_seconds())
+    except Exception:
+        return None
+
+
+def _load_payload(path:Path)->bytes:
+    return path.read_bytes()
+
+
+def refresh_support_bundle(*,force:bool=False,min_age_seconds:float=_MIN_REFRESH_AGE_SECONDS)->Dict[str,Any]:
+    """Refresh off-request, but never continuously rebuild a still-fresh large archive."""
+    global _PAYLOAD
+    try:
+        with _LOCK:
+            current=dict(_STATUS)
+        age=_generated_age_seconds(current)
+        if not force and _LATEST_PATH.exists() and current.get("ready") is True and age is not None and age<max(60.0,float(min_age_seconds)):
+            if _PAYLOAD is None:
+                payload=_load_payload(_LATEST_PATH)
+                with _LOCK:_PAYLOAD=payload
+            with _LOCK:
+                _STATUS.update({"payload_ready":_PAYLOAD is not None,
+                                "payload_bytes":len(_PAYLOAD) if _PAYLOAD is not None else 0,
+                                "request_path_filesystem_reads":0,
+                                "min_refresh_age_seconds":max(60.0,float(min_age_seconds)),
+                                "refresh_skipped_fresh":True})
+            return support_bundle_status()
         out=_build_to_path(_LATEST_PATH)
+        payload=_load_payload(_LATEST_PATH)
+        out.update({"payload_ready":True,"payload_bytes":len(payload),
+                    "request_path_filesystem_reads":0,
+                    "min_refresh_age_seconds":max(60.0,float(min_age_seconds)),
+                    "refresh_skipped_fresh":False})
         _STATUS_PATH.parent.mkdir(parents=True,exist_ok=True)
         _STATUS_PATH.write_text(json.dumps(out,separators=(",",":"),default=str))
         with _LOCK:
+            _PAYLOAD=payload
             _STATUS.clear();_STATUS.update(out)
     except Exception as exc:
         with _LOCK:
@@ -158,16 +198,25 @@ def refresh_support_bundle()->Dict[str,Any]:
 
 
 def prime_support_bundle()->Dict[str,Any]:
-    """Restore the last complete bundle metadata without rebuilding it."""
+    """Restore metadata and preload the completed compressed archive before serving HTTP."""
+    global _PAYLOAD
     loaded={}
+    payload=None
     try:
         if _STATUS_PATH.exists():
             loaded=json.loads(_STATUS_PATH.read_text())
     except Exception:
         loaded={}
-    if _LATEST_PATH.exists():
-        loaded={**loaded,"ready":True,"path":str(_LATEST_PATH),"size_bytes":_LATEST_PATH.stat().st_size}
+    try:
+        if _LATEST_PATH.exists():
+            payload=_load_payload(_LATEST_PATH)
+            loaded={**loaded,"ready":True,"path":str(_LATEST_PATH),"size_bytes":_LATEST_PATH.stat().st_size,
+                    "payload_ready":True,"payload_bytes":len(payload),"request_path_filesystem_reads":0,
+                    "min_refresh_age_seconds":_MIN_REFRESH_AGE_SECONDS}
+    except Exception as exc:
+        loaded={**loaded,"payload_ready":False,"last_error":str(exc)[:240]}
     with _LOCK:
+        _PAYLOAD=payload
         if loaded:
             _STATUS.clear();_STATUS.update(loaded)
     return support_bundle_status()
@@ -180,6 +229,11 @@ def support_bundle_status()->Dict[str,Any]:
 
 def latest_support_bundle_path()->Path|None:
     return _LATEST_PATH if _LATEST_PATH.exists() else None
+
+
+def latest_support_bundle_payload()->bytes|None:
+    with _LOCK:
+        return _PAYLOAD
 
 
 def build_support_bundle()->tuple[bytes,str]:

@@ -1,18 +1,18 @@
-# PS Scanner Quant v6.8.11
+# PS Scanner Quant v6.8.12
 
-v6.8.11 is the current release candidate. It is a narrow acceptance/release-plumbing fix based on the real-Mac v6.8.10 acceptance run.
+v6.8.12 is the current release candidate. It is a narrow runtime-completion release based on the real-Mac v6.8.11 acceptance run.
 
-v6.8.10 successfully fixed the live request-path contention: health became consistently sub-second and pure-memory, Performance returned all 196 CLOSED rows from its passive cache, and International returned from its passive cache. The remaining issues were a stale validator assertion that still expected the old `passive_bounded` contract and an uncompressed ~394 MB prebuilt support ZIP that could not complete the explicit 10-second localhost acceptance download.
+v6.8.11 installed successfully with 333 tests passing, Groww CONNECTED, and the passive request architecture intact. Acceptance still found two genuine background-work failures: Global→India admitted 2,286 detailed candidates from the 3,390-share full-NSE summary pass and exceeded its 600-second watchdog, while the compressed support bundle took about 561 seconds to rebuild under live load and its 47.1 MB response did not finish the explicit 10-second localhost download.
 
-v6.8.11 makes the validator enforce the current `passive_cached/background_precomputed` contract and validate International/support-export readiness. The support bundle is now compressed with low-cost DEFLATE level 1 during its existing background/pre-launch build; clicking Export still performs no bundle construction.
+v6.8.12 keeps full NSE breadth but makes Global→India detail work bounded, resumable and exact via conservative branch-and-bound; incomplete work never publishes a partial board. The support producer coalesces fresh rebuilds and preloads the completed compressed archive into memory, so Export All Logs performs no database, redaction, compression or filesystem work on click.
 
 No trading threshold, risk limit, evidence rule, frozen-identity rule, Static-IP scope, breadth rule, or Champion/Challenger promotion rule changes.
 
 See:
+- `RELEASE_v6.8.12.md`
+- `ARCHITECTURE_AUDIT_v6.8.12.md`
 - `RELEASE_v6.8.11.md`
 - `ARCHITECTURE_AUDIT_v6.8.11.md`
-- `RELEASE_v6.8.10.md`
-- `ARCHITECTURE_AUDIT_v6.8.10.md`
 
 # PS Scanner Quant v6.8.1 — Bounded Performance Analytics Reliability
 
