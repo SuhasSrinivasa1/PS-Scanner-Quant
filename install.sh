@@ -211,6 +211,15 @@ rm -rf .venv
 from psscanner_quant.data import backfill_history_summaries
 print("History summary backfill:", backfill_history_summaries())
 PYHS
+./.venv/bin/python - <<'PYAC'
+from psscanner_quant.institutional_intelligence import backfill_compact_summary
+from psscanner_quant.trading_algorithm import refresh
+inst=backfill_compact_summary()
+print("Institutional compact summary:", {"status":inst.get("status"),"summary_status":(inst.get("summary") or {}).get("status")})
+algo=refresh()
+print("Algorithm passive cache:", {"cache_ready":algo.get("cache_ready"),"algorithm_version":algo.get("algorithm_version"),
+                                  "institutional_status":(algo.get("institutional_intelligence") or {}).get("status")})
+PYAC
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF
