@@ -16,7 +16,7 @@ MODE="migration"
 cleanup(){ rm -f "$TMPSECRET" "$OLD_STATUS" "$NEW_HEALTH" "$NEW_GROWW" "$PLIST_BACKUP" 2>/dev/null || true; }
 trap cleanup EXIT
 
-echo "PS Scanner Quant v6.8.6 safe install / in-place upgrade"
+echo "PS Scanner Quant v6.8.7 safe install / in-place upgrade"
 echo "Target: $APP"
 echo
 
@@ -211,6 +211,15 @@ rm -rf .venv
 from psscanner_quant.data import backfill_history_summaries
 print("History summary backfill:", backfill_history_summaries())
 PYHS
+./.venv/bin/python - <<'PYAC'
+from psscanner_quant.institutional_intelligence import backfill_compact_summary
+from psscanner_quant.trading_algorithm import refresh
+inst=backfill_compact_summary()
+print("Institutional compact summary:", {"status":inst.get("status"),"summary_status":(inst.get("summary") or {}).get("status")})
+algo=refresh()
+print("Algorithm passive cache:", {"cache_ready":algo.get("cache_ready"),"algorithm_version":algo.get("algorithm_version"),
+                                  "institutional_status":(algo.get("institutional_intelligence") or {}).get("status")})
+PYAC
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF
@@ -247,7 +256,7 @@ PYH
   sleep 2
 done
 if [[ $ok -ne 1 ]]; then
-  echo "v6.8.6 service did not pass application health check. See $APP/logs/service-error.log" >&2
+  echo "v6.8.7 service did not pass application health check. See $APP/logs/service-error.log" >&2
   exit 20
 fi
 
@@ -278,7 +287,7 @@ PYA
 done
 
 if [[ $groww_ok -ne 1 ]]; then
-  echo "v6.8.6 application started, but Groww connectivity could not be verified after explicit probes." >&2
+  echo "v6.8.7 application started, but Groww connectivity could not be verified after explicit probes." >&2
   if [[ $groww_auth_required -gt 0 ]]; then
     echo "Groww returned AUTH_REQUIRED during verification." >&2
   else
@@ -307,7 +316,7 @@ trap cleanup EXIT
 
 echo
 echo "============================================================"
-echo "PS Scanner Quant v6.8.6 INSTALLED"
+echo "PS Scanner Quant v6.8.7 INSTALLED"
 echo "UI: http://127.0.0.1:8765"
 echo "Groww authentication: VERIFIED"
 echo "v6 runtime data/ledger: PRESERVED"

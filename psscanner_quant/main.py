@@ -37,7 +37,7 @@ from .data import liquidity_rank, cached_history_coverage, full_nse_symbols, uni
 from .cross_market import board_payload as global_india_board_payload
 from .evidence_fabric import status as evidence_fabric_status
 from .institutional_intelligence import cached_status as institutional_status, point_in_time_history as institutional_history
-from .trading_algorithm import status as algorithm_status, history as algorithm_history
+from .trading_algorithm import status as algorithm_status, history as algorithm_history, prime_cache as prime_algorithm_cache
 
 app=FastAPI(title=APP_NAME,version=VERSION)
 
@@ -57,7 +57,7 @@ class SettingsPatch(BaseModel):
 
 @app.on_event("startup")
 def _startup():
-    init_db();seed_library();engine.start()
+    init_db();seed_library();prime_algorithm_cache();engine.start()
 
 @app.on_event("shutdown")
 def _shutdown():engine.stop()
@@ -217,6 +217,9 @@ def health():
         "performance_reliability_patch":{"version":"6.8.1","name":"BOUNDED_PERFORMANCE_ANALYTICS",
             "api_db_timeout_seconds":.5,"api_query_budget_seconds":2.5,"network_calls":False,
             "single_snapshot":True,"narrow_projection":True,"deep_learning_uses_passive_budget":False},
+        "algorithm_cache_patch":{"version":"6.8.7","name":"PASSIVE_COMPACT_ALGORITHM_STATUS",
+            "api_rebuilds_snapshot":False,"network_calls":False,"deep_institutional_payload":False,
+            "offline_installer_prime":True,"background_refresh_only":True},
         "orchestration_patch":{"version":"6.8.0","policy":"V680_ONE_OBSERVATION_MANY_CONSUMERS",
             "scanner_frequency_reduced":False,"shared_priority_quotes":True,"shared_news":True,
             "shared_events":True,"shared_institutional":True,"shared_international_transport":True},

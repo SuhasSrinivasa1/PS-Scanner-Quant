@@ -29,6 +29,7 @@ ANNOUNCEMENTS_API = "/api/corporate-announcements"
 
 _LOCK=RLock()
 _CACHE:Dict[str,Any]={}
+_SUMMARY_CACHE:Dict[str,Any]={}
 _SESSION=requests.Session()
 _SESSION.headers.update({
     "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125 Safari/537.36",
@@ -328,11 +329,78 @@ def refresh(force:bool=False,symbols:Optional[Iterable[str]]=None)->Dict[str,Any
     for key in ("flows","large_deals","delivery","disclosures","derivatives"):
         if not out.get(key) and old.get(key):out[key]=old.get(key)
     out["large_deal_count"]=len(out.get("large_deals") or [])
+    summary=_compact_summary(out)
     with _LOCK:
         _CACHE.clear();_CACHE.update(out)
-    set_state("institutional_intelligence",out);_persist_snapshot(out)
+        _SUMMARY_CACHE.clear();_SUMMARY_CACHE.update(summary)
+    set_state("institutional_intelligence",out)
+    set_state("institutional_intelligence_summary",summary)
+    _persist_snapshot(out)
     if errors:health("institutional_intelligence","WARN","; ".join(errors)[:240])
     return dict(out)
+
+def _compact_summary(state:Dict[str,Any])->Dict[str,Any]:
+    deals=list(state.get("large_deals") or [])
+    disclosures=state.get("disclosures") or {}
+    derivatives_status=dict(state.get("derivatives_status") or {})
+    flows=state.get("flows") or {}
+    priced=0
+    for row in deals:
+        try:
+            if float((row or {}).get("price") or 0)>0:priced+=1
+        except Exception:pass
+    return {
+        "captured_at":state.get("captured_at"),
+        "status":state.get("status") or "UNAVAILABLE",
+        "large_deal_count":int(state.get("large_deal_count") or len(deals)),
+        "large_deals_with_price":priced,
+        "delivery_count":int(((state.get("delivery") or {}).get("count")) or 0),
+        "insider_transaction_count":len(disclosures.get("insider_transactions") or []),
+        "regulatory_announcement_count":len(disclosures.get("regulatory_announcements") or []),
+        "derivatives_status":derivatives_status,
+        "flow_summary":{
+            "FII_FPI":dict(flows.get("FII_FPI") or {}),
+            "DII":dict(flows.get("DII") or {}),
+        },
+        "errors":list(state.get("errors") or []),
+        "policy":state.get("policy") or POLICY,
+        "scope_note":"Compact passive summary only. Use /api/institutional for deep point-in-time records.",
+    }
+
+
+def cached_summary()->Dict[str,Any]:
+    """Return bounded institutional telemetry without decoding the full persisted snapshot."""
+    with _LOCK:
+        if _SUMMARY_CACHE:return dict(_SUMMARY_CACHE)
+        if _CACHE:
+            summary=_compact_summary(_CACHE)
+            _SUMMARY_CACHE.update(summary)
+            return dict(_SUMMARY_CACHE)
+    state=get_state("institutional_intelligence_summary",{}) or {}
+    if state:
+        with _LOCK:
+            if not _SUMMARY_CACHE:_SUMMARY_CACHE.update(dict(state))
+            return dict(_SUMMARY_CACHE)
+    return {"status":"WARMING","policy":POLICY,
+            "scope_note":"Compact passive summary not produced yet; deep institutional evidence remains separate."}
+
+
+def backfill_compact_summary()->Dict[str,Any]:
+    """Create the v6.8.7 compact summary from the last persisted deep snapshot offline."""
+    existing=get_state("institutional_intelligence_summary",{}) or {}
+    if existing:
+        with _LOCK:
+            _SUMMARY_CACHE.clear();_SUMMARY_CACHE.update(dict(existing))
+        return {"status":"EXISTING","summary":dict(existing)}
+    deep=get_state("institutional_intelligence",{}) or {}
+    if not deep:
+        return {"status":"NO_PERSISTED_SNAPSHOT","summary":{}}
+    summary=_compact_summary(deep)
+    set_state("institutional_intelligence_summary",summary)
+    with _LOCK:
+        _SUMMARY_CACHE.clear();_SUMMARY_CACHE.update(summary)
+    return {"status":"BACKFILLED","summary":summary}
+
 
 def cached_status()->Dict[str,Any]:
     with _LOCK:

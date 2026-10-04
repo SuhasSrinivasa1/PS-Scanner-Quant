@@ -6,16 +6,20 @@ import math
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from threading import RLock
 
 from .constants import IST, VERSION
 from .db import db, get_state, now_iso, set_state
 from .evidence_fabric import status as fabric_status
-from .institutional_intelligence import cached_status as institutional_status
+from .institutional_intelligence import cached_summary as institutional_summary
 
 POLICY="V680_ADAPTIVE_EVIDENCE_GATED_TRADING_ALGORITHM"
 ACCURACY_TARGET=0.80
 MIN_TARGET_SAMPLES=50
 BOOKS=("INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","CIRCUIT_NEXTDAY","INTERNATIONAL","GLOBAL_INDIA_LONG","GLOBAL_INDIA_SHORT")
+
+_CACHE:Dict[str,Any]={}
+_CACHE_LOCK=RLock()
 
 
 def _wilson(wins:int,n:int,z:float=1.96)->Tuple[Optional[float],Optional[float]]:
@@ -144,7 +148,7 @@ def snapshot(record:bool=False)->Dict[str,Any]:
         },
         "outputs":_live_outputs(),
         "evidence_fabric":fabric_status(),
-        "institutional_intelligence":institutional_status(),
+        "institutional_intelligence":institutional_summary(),
         "execution_policy":"Algorithm publishes research/recommendations automatically; Groww orders remain explicit manual preview/confirm and all execution gates remain fail-closed.",
     }
     set_state("adaptive_algorithm_current",{
@@ -170,8 +174,38 @@ def _record(payload:Dict[str,Any])->None:
     except Exception:pass
 
 
+def _cache_payload(payload:Dict[str,Any])->Dict[str,Any]:
+    out=dict(payload)
+    out["version_history"]=history(30)
+    out["cache_ready"]=True
+    out["algorithm_contract"]={
+        "passive_cached":True,
+        "network_calls":False,
+        "deep_institutional_payload":False,
+        "background_refresh_only":True,
+    }
+    with _CACHE_LOCK:
+        _CACHE.clear();_CACHE.update(out)
+    # Persist only the compact algorithm view so restart/API warm-up never has to decode
+    # the historical deep institutional snapshot.
+    set_state("adaptive_algorithm_status_cache",out)
+    return dict(out)
+
+
+def prime_cache()->Dict[str,Any]:
+    """Prime the passive API cache outside request handling."""
+    with _CACHE_LOCK:
+        if _CACHE:return dict(_CACHE)
+    state=get_state("adaptive_algorithm_status_cache",{}) or {}
+    if state:
+        with _CACHE_LOCK:
+            if not _CACHE:_CACHE.update(dict(state))
+            return dict(_CACHE)
+    return {}
+
+
 def refresh()->Dict[str,Any]:
-    return snapshot(record=True)
+    return _cache_payload(snapshot(record=True))
 
 
 def history(limit:int=30)->List[Dict[str,Any]]:
@@ -187,4 +221,32 @@ def history(limit:int=30)->List[Dict[str,Any]]:
 
 
 def status()->Dict[str,Any]:
-    out=snapshot(record=False);out["version_history"]=history(30);return out
+    """Pure passive view; never rebuild the algorithm snapshot in an API request."""
+    with _CACHE_LOCK:
+        if _CACHE:return dict(_CACHE)
+    return {
+        "software_version":VERSION,
+        "algorithm_version":None,
+        "policy":POLICY,
+        "generated_at":None,
+        "active_strategy_count":None,
+        "accuracy":{},
+        "accuracy_target":{
+            "target":ACCURACY_TARGET,
+            "minimum_samples":MIN_TARGET_SAMPLES,
+            "status":"WARMING",
+            "guaranteed":False,
+        },
+        "adaptation":{"status":"WARMING_BACKGROUND_REFRESH_REQUIRED"},
+        "outputs":{},
+        "evidence_fabric":{},
+        "institutional_intelligence":{"status":"WARMING"},
+        "version_history":[],
+        "cache_ready":False,
+        "algorithm_contract":{
+            "passive_cached":True,
+            "network_calls":False,
+            "deep_institutional_payload":False,
+            "background_refresh_only":True,
+        },
+    }

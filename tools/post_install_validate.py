@@ -33,7 +33,7 @@ def get(path, *, timeout=6.0, attempts=4):
 
 
 ping=get("/api/ping",timeout=2,attempts=3)
-if ping.get("version")!="6.8.6":fail("runtime version is not 6.8.6")
+if ping.get("version")!="6.8.7":fail("runtime version is not 6.8.7")
 
 health_started=time.monotonic()
 health=get("/api/health",timeout=3,attempts=4)
@@ -50,11 +50,19 @@ if life.get("policy_version")!="V680_SHARED_EVIDENCE_FABRIC_ADAPTIVE_ALGORITHM":
 fabric=get("/api/evidence/fabric",timeout=4)
 if fabric.get("policy")!="V680_ONE_OBSERVATION_MANY_CONSUMERS":fail("shared evidence fabric policy missing")
 if fabric.get("mode")!="SHARED_PRODUCERS_CACHE_ONLY_CONSUMERS":fail("scanner evidence fabric is not producer/consumer mode")
-algorithm=get("/api/algorithm",timeout=6)
+algorithm_started=time.monotonic()
+algorithm=get("/api/algorithm",timeout=3,attempts=2)
+algorithm_elapsed=time.monotonic()-algorithm_started
 if algorithm.get("policy")!="V680_ADAPTIVE_EVIDENCE_GATED_TRADING_ALGORITHM":fail("adaptive algorithm policy missing")
 target=algorithm.get("accuracy_target") or {}
 if abs(float(target.get("target") or 0)-0.80)>1e-9:fail("algorithm 80% evidence target missing")
 if target.get("guaranteed") is not False:fail("algorithm must never represent the 80% target as guaranteed")
+algorithm_contract=algorithm.get("algorithm_contract") or {}
+if algorithm.get("cache_ready") is not True:fail("algorithm passive cache is not ready")
+if algorithm_contract.get("passive_cached") is not True:fail("algorithm endpoint is not cache-only")
+if algorithm_contract.get("network_calls") is not False:fail("algorithm endpoint may perform network work")
+if algorithm_contract.get("deep_institutional_payload") is not False:fail("algorithm endpoint embeds deep institutional evidence")
+if algorithm_elapsed>4:fail(f"algorithm passive cache exceeded bounded validation budget: {algorithm_elapsed:.1f}s")
 
 sanity_started=time.monotonic()
 sanity=get("/api/sanity",timeout=4,attempts=4)
@@ -111,6 +119,8 @@ print(json.dumps({
     "evidence_fabric_policy":fabric.get("policy"),
     "algorithm_version":algorithm.get("algorithm_version"),
     "algorithm_accuracy_target":target,
+    "algorithm_elapsed_seconds":round(algorithm_elapsed,3),
+    "algorithm_contract":algorithm_contract,
     "performance_rows_scanned":perf.get("rows_scanned"),
     "performance_contract":perf_contract,
     "diagnostic_books":len(diag.get("books") or {}),
