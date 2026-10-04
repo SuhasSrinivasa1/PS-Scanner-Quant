@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
 from .constants import IST, GLOBAL_INDIA_FREEZE_TIME, SHORT_HARD_EXIT
@@ -128,7 +128,7 @@ def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
 
 
 def build_global_india_board() -> Dict[str,Any]:
-    started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now);week_key=(now.date()-__import__('datetime').timedelta(days=now.weekday())).isoformat();g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
+    started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now);week_key=(now.date()-timedelta(days=now.weekday())).isoformat();g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
     settings=load_settings();max_side=max(1,min(10,int(settings.get('global_india_max_per_side',5))))
     syms=full_nse_symbols()
     meta={str(x.get('symbol') or '').upper():x for x in universe()}
