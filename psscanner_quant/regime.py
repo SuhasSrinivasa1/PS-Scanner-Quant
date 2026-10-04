@@ -32,7 +32,7 @@ def classify(prices: Dict[str,float] | None=None, allow_network_prices: bool=Tru
             state=dict(state);state["stale"]=True;return state
         return {"regime":"WARMING","breadth_up_pct":0.0,"breadth_down_pct":0.0,"median_move_pct":0.0,"sample":0,"universe":0,"generated_at":now_iso(),"stale":True}
     prices=dict(prices or (live_prices(syms,allow_network=allow_network_prices,max_age_seconds=20) if allow_network_prices else live_prices(syms,allow_network=False,max_age_seconds=300)))
-    summaries=dict(summaries or history_summary_snapshot(syms))
+    summaries=dict(history_summary_snapshot(syms) if summaries is None else summaries)
     moves=[];trend_votes=[];vol=[];history_ready=0
     for s in syms:
         closes=[float(x) for x in ((summaries.get(s) or {}).get("recent_closes") or [])[-60:]]
