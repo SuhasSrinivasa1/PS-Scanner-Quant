@@ -105,9 +105,10 @@ def _global_india_summary_features(summary:Dict[str,Any])->Dict[str,float]|None:
 
 
 def _global_india_score_ceiling(aligned:float, trend:float, side:str, calibration:float)->float:
-    sign=1 if str(side).upper()=="LONG" else -1
-    trend_ok=sign*float(trend)>=0
-    return 68+min(16,float(aligned)*9)+(7 if trend_ok else -4)+7+float(calibration)
+    # A true upper bound must grant the best possible trend contribution as well as
+    # the maximum ADX contribution. The summary trend is advisory here; detailed
+    # H/L/C validation may legitimately drop rows that the close-only summary retained.
+    return 68+min(16,float(aligned)*9)+7+7+float(calibration)
 
 
 def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
