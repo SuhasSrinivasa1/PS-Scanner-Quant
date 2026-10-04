@@ -121,6 +121,7 @@ _DEFAULTS: Dict[str, Any] = {
     "monthly_append_max_total": 8,
     "etf_append_max_total": 3,
     "international_append_max_total": 3,
+    "global_india_append_max_total": 5,
     "horizon_append_max_per_day": 1,
     "horizon_append_score_uplift": 5.0,
     "cohort_min_samples_for_live_use": 50,
