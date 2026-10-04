@@ -1,8 +1,22 @@
 # PS Scanner handoff
 
-Current source version: **6.8.10**.
+Current source version: **6.8.11**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.11 acceptance-gate and compressed-export fix
+
+The real-Mac v6.8.10 upgrade succeeded: checksum/integrity passed, Python 3.12.13 was selected, 329 tests passed, Groww explicit verification returned CONNECTED, and passive Performance/International caches plus the support bundle primed successfully before launch.
+
+The live-worker acceptance run proved the v6.8.10 contention fix. Eight health calls stayed sub-second with zero request-path DB connections, subsystem refreshes or filesystem reads. Performance returned COMPLETE for all 196 CLOSED rows from the passive cache using idx_recs_state_closed_perf_cover. International returned from its passive cache.
+
+Two release-plumbing issues remained. The validator still required the obsolete passive_bounded Performance contract, creating a false negative. The support bundle was prebuilt but uncompressed (~394 MB on the production Mac), so the explicit 10-second localhost download acceptance test timed out after only a partial transfer.
+
+v6.8.11 aligns the validator with passive_cached/background_precomputed semantics, derives expected VERSION from the installed source tree, validates International/support-export readiness, and compresses the prebuilt support archive with DEFLATE level 1 in the existing background/pre-launch producer.
+
+No trading, evidence, risk, breadth, lifecycle, identity, Static-IP or strategy-promotion rule changes.
+
+See `RELEASE_v6.8.11.md` and `ARCHITECTURE_AUDIT_v6.8.11.md`.
 
 ## v6.8.10 passive UI completion
 
