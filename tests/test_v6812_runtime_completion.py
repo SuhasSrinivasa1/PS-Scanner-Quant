@@ -76,6 +76,19 @@ class V6812RuntimeCompletionTests(unittest.TestCase):
             support_bundle._STATUS.clear()
             support_bundle._STATUS.update(old_status)
 
+    def test_support_refresh_defers_behind_heavy_research(self):
+        src=inspect.getsource(engine.Engine._support_bundle_refresh)
+        self.assertIn('"global_india"',src)
+        self.assertIn('"market_snapshot"',src)
+        self.assertIn("LOW_PRIORITY_SUPPORT_REFRESH_NEVER_COMPETES_WITH_HEAVY_RESEARCH",src)
+        e=engine.Engine()
+        e.worker_runtime["global_india"]={"state":"RUNNING"}
+        with patch.object(support_bundle,"refresh_support_bundle",side_effect=AssertionError("heavy overlap")):
+            # Import inside Engine points at the module function, so patch its module source.
+            with patch("psscanner_quant.support_bundle.refresh_support_bundle",side_effect=AssertionError("heavy overlap")):
+                with patch("psscanner_quant.engine.set_state"):
+                    e._support_bundle_refresh()
+
     def test_support_http_response_uses_preloaded_memory_only(self):
         src=inspect.getsource(main.support_export)
         self.assertIn("latest_support_bundle_payload()",src)
