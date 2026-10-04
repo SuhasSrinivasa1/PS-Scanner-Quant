@@ -227,7 +227,7 @@ def freeze_global_india_board() -> int:
 def run_global_india_cycle() -> int:
     try:
         board=build_global_india_board();made=freeze_global_india_board()
-        set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','status':'OK','generated_at':board.get('generated_at'),'target_session':board.get('target_session'),'state':board.get('state'),'long':len(board.get('long') or []),'short':len(board.get('short') or []),'published':made,'at':now_iso()})
+        set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':False,'status':'OK','generated_at':board.get('generated_at'),'target_session':board.get('target_session'),'state':board.get('state'),'long':len(board.get('long') or []),'short':len(board.get('short') or []),'published':made,'runtime':board.get('runtime') or {},'at':now_iso()})
         return made
     except Exception as exc:
         health('global_india','WARN',str(exc)[:220]);set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','status':'ERROR','error':str(exc)[:220],'at':now_iso()});return 0
