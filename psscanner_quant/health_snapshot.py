@@ -26,8 +26,10 @@ _CACHE: Dict[str, Any] = {
 }
 
 def status() -> Dict[str, Any]:
+    # Writers replace the complete snapshot under _LOCK. Passive readers never mutate
+    # nested values, so a shallow copy avoids deep-copying full evidence/state payloads.
     with _LOCK:
-        return copy.deepcopy(_CACHE)
+        return dict(_CACHE)
 
 def refresh() -> Dict[str, Any]:
     """Refresh the DB-backed health snapshot outside passive request paths.
@@ -64,10 +66,21 @@ def refresh() -> Dict[str, Any]:
             ).fetchall()}
             f=con.execute("SELECT COUNT(*),COUNT(DISTINCT symbol),MIN(asof),MAX(asof) FROM fundamental_snapshots").fetchone()
             e=con.execute("SELECT COUNT(*),SUM(CASE WHEN starts_at>=? THEN 1 ELSE 0 END) FROM market_events",(now_iso(),)).fetchone()
+        from .broker import broker
+        from .orders import execution_readiness_cached_snapshot
+        from .trading_calendar import status as trading_calendar_status
+        from .sector_context import status_cached as sector_status_cached
+        from .history_control import status_cached as history_control_status_cached
+        groww=broker.status_cached()
+        static_ip=broker.static_ip_status_cached()
+        execution=execution_readiness_cached_snapshot(order_count,state.get("position_reconciliation") or {})
         snapshot={
             "ready":True,"refreshed_at":now_iso(),"last_attempt_at":attempt,"last_error":None,
             "elapsed_ms":round((time.monotonic()-started)*1000.0,1),"order_count":order_count,"state":state,
             "recent":recent,"recommendation_counts":recs,"decision_counts_24h":decisions,
+            "groww":groww,"static_ip":static_ip,"execution":execution,
+            "trading_calendar":trading_calendar_status(),"sector_breadth":sector_status_cached(),
+            "history_control":history_control_status_cached(),
             "fundamentals":{
                 "snapshots":int(f[0] or 0),"symbols":int(f[1] or 0),"first_asof":f[2],"last_asof":f[3],
                 "mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE","bounded":True,
