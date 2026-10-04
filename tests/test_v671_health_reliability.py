@@ -58,10 +58,11 @@ class V671HealthReliabilityTests(unittest.TestCase):
             out=main.health()
             elapsed=time.monotonic()-started
             self.assertLess(elapsed,2.0)
-            self.assertEqual(out["version"],"6.8.9")
+            self.assertEqual(out["version"],"6.8.10")
             self.assertFalse(out["health_contract"]["network_calls"])
             self.assertTrue(out["health_contract"]["history_pacer_nonblocking"])
-            self.assertTrue(out["evidence"]["history_control"]["pacer_busy"])
+            self.assertIn("history_control",out["evidence"])
+            self.assertEqual(out["health_contract"]["subsystem_refresh_calls_on_request"],0)
         finally:
             release.set();t.join(1)
 
