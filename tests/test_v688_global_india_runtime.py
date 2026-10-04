@@ -50,13 +50,14 @@ class V688GlobalIndiaRuntimeTests(unittest.TestCase):
 
     def test_compact_summary_close_sequence_matches_authoritative_parser(self):
         candles=[]
+        base=1_780_000_000
         for i in range(65):
-            day=f"2026-07-{(i%28)+1:02d}T00:00:00+05:30"
+            ts=base+i*86400
             px=100.0+i
-            candles.append([day,px-1,px+2,px-2,px,1000+i])
+            candles.append([ts,px-1,px+2,px-2,px,1000+i])
         # Last duplicate wins in both paths; an invalid HLC row is ignored in both paths.
-        candles.append(["2026-07-10T00:00:00+05:30",150,152,148,151,2000])
-        candles.append(["2026-09-30T00:00:00+05:30",150,None,148,151,2000])
+        candles.append([base+10*86400,150,152,148,151,2000])
+        candles.append([base+70*86400,150,None,148,151,2000])
         rows,closes=data._history_summary_values("1day",candles)
         df=data._parse_candles(candles)
         self.assertEqual(rows,len(df))
