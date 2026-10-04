@@ -59,7 +59,9 @@ class V6810PassiveUIViewTests(unittest.TestCase):
         producer=inspect.getsource(support_bundle.refresh_support_bundle)
         self.assertIn("_build_to_path",producer)
         self.assertIn("support_bundle_status",producer)
-        self.assertIn("ZIP_STORED",Path(support_bundle.__file__).read_text())
+        support_src=Path(support_bundle.__file__).read_text()
+        self.assertIn("ZIP_STORED",support_src)
+        self.assertIn("_redact_text(line,secrets)",support_src)
 
     def test_background_workers_own_passive_views_and_export(self):
         src=inspect.getsource(engine.Engine._supervise)
