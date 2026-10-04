@@ -568,15 +568,17 @@ def backfill_history_summaries() -> Dict[str,Any]:
     """
     from .db import init_db
     init_db()
-    syms=[str(x.get("symbol") or "").upper() for x in universe() if x.get("symbol")]
-    payload=[];files=0;started=time.monotonic()
-    for sym in syms:
-        for interval in ("1day","5minute"):
-            path=_history_path(sym,interval)
-            if not path.exists():continue
-            raw=_load_raw_candles(path);rows,closes=_history_summary_values(interval,raw)
-            payload.append((sym,interval,rows,json.dumps(closes,separators=(",",":")),int(path.stat().st_mtime_ns),now_iso()))
-            files+=1
+    payload=[];files=0;started=time.monotonic();symbols=set()
+    candidates=[]
+    for interval in ("1day","5minute"):
+        suffix=f".{interval}.json"
+        for path in _CACHE.glob(f"*{suffix}"):
+            sym=path.name[:-len(suffix)].upper()
+            if sym:candidates.append((sym,interval,path));symbols.add(sym)
+    for sym,interval,path in candidates:
+        raw=_load_raw_candles(path);rows,closes=_history_summary_values(interval,raw)
+        payload.append((sym,interval,rows,json.dumps(closes,separators=(",",":")),int(path.stat().st_mtime_ns),now_iso()))
+        files+=1
     if payload:
         with db(timeout_seconds=30.0) as con:
             con.execute("BEGIN")
@@ -591,7 +593,7 @@ def backfill_history_summaries() -> Dict[str,Any]:
                 con.execute("COMMIT")
             except Exception:
                 con.execute("ROLLBACK");raise
-    out={"symbols":len(syms),"files_indexed":files,"rows":len(payload),
+    out={"symbols":len(symbols),"files_indexed":files,"rows":len(payload),
          "elapsed_seconds":round(time.monotonic()-started,2),
          "policy":"V686_OFFLINE_INSTALL_BACKFILL_RUNTIME_SUMMARY_INDEX"}
     set_state("history_summary_backfill",out)
