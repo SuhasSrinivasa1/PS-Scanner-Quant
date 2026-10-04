@@ -71,8 +71,15 @@ def refresh_performance()->Dict[str,Any]:
     """Build all website performance groupings off-request from one DB snapshot."""
     started=time.monotonic();attempt=now_iso()
     try:
-        from .analytics import performance_cache_views
-        views=performance_cache_views(group_bys=UI_PERFORMANCE_GROUPS,limits=PERFORMANCE_LIMITS)
+        from .analytics import performance
+        views={}
+        for limit in PERFORMANCE_LIMITS:
+            for group_by in UI_PERFORMANCE_GROUPS:
+                out=performance(group_by=group_by,limit=limit,budget_seconds=None,db_timeout_seconds=10.0)
+                out["performance_contract"]={**(out.get("performance_contract") or {}),
+                    "background_precomputed":True,"passive_cached_source":True}
+                views[f"{group_by}|{limit}"]=out
+                time.sleep(0)
         payload={"version":VERSION,"ready":True,"refreshed_at":now_iso(),"last_attempt_at":attempt,"last_error":None,
                  "elapsed_ms":round((time.monotonic()-started)*1000.0,1),"views":views,
                  "policy":"V681_COMPLETE_ANALYTICS_PRECOMPUTED_FOR_PASSIVE_UI_VIEWS"}
