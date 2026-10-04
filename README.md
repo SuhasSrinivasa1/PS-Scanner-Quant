@@ -1,10 +1,10 @@
-# PS Scanner Quant v6.8.8
+# PS Scanner Quant v6.8.9
 
-v6.8.8 is the current public-repository release candidate. Real-Mac v6.8.6 proved the persisted history-summary and WATP fixes, but also exposed a separate passive-API defect: `/api/algorithm` rebuilt and serialized the complete adaptive snapshot inline, including the deep institutional dataset. Client timeouts could leave multiple expensive server-side requests running and then starve otherwise bounded `/api/performance` and `/api/health` calls. v6.8.7 makes algorithm status a precomputed compact cache, primes it while the service is stopped, and keeps deep institutional evidence exclusively on its dedicated endpoint. All v6.8.6 breadth/history fixes and trading/risk/frozen-identity invariants remain intact.
+v6.8.9 is the current public-repository release candidate. Real-Mac v6.8.6 proved the persisted history-summary and WATP fixes, but also exposed a separate passive-API defect: `/api/algorithm` rebuilt and serialized the complete adaptive snapshot inline, including the deep institutional dataset. Client timeouts could leave multiple expensive server-side requests running and then starve otherwise bounded `/api/performance` and `/api/health` calls. v6.8.7 makes algorithm status a precomputed compact cache, primes it while the service is stopped, and keeps deep institutional evidence exclusively on its dedicated endpoint. All v6.8.6 breadth/history fixes and trading/risk/frozen-identity invariants remain intact.
 
 See:
-- `RELEASE_v6.8.8.md`
-- `ARCHITECTURE_AUDIT_v6.8.8.md`
+- `RELEASE_v6.8.9.md`
+- `ARCHITECTURE_AUDIT_v6.8.9.md`
 - `RELEASE_v6.8.7.md`
 - `ARCHITECTURE_AUDIT_v6.8.7.md`
 - `RELEASE_v6.8.6.md`
