@@ -5,12 +5,24 @@ import time
 from threading import RLock
 from typing import Any, Dict, List
 
-from .data import universe, history, _history_path
-from .features import latest_features
-from .db import health
+from .data import universe, history_summary_snapshot
+from .db import health, get_state, now_iso, set_state
 
 _CACHE: Dict[str, Any] = {"at":0.0,"snapshot":{}}
 _LOCK=RLock()
+
+
+def prime_cache() -> Dict[str,Any]:
+    """Restore the last complete sector snapshot outside passive request paths."""
+    if _CACHE.get("snapshot"):return dict(_CACHE["snapshot"])
+    try:
+        state=get_state("sector_context_snapshot",{}) or {}
+        snap=state.get("snapshot") if isinstance(state,dict) else {}
+        if isinstance(snap,dict) and snap:
+            _CACHE["snapshot"]=dict(snap);_CACHE["at"]=time.time()
+    except Exception:
+        pass
+    return dict(_CACHE.get("snapshot") or {})
 
 
 def _industry_map() -> Dict[str,List[str]]:
@@ -22,18 +34,24 @@ def _industry_map() -> Dict[str,List[str]]:
     return out
 
 
-def _feat(sym:str)->Dict[str,Any]:
+def _feat(sym:str,summaries:Dict[str,Dict[str,Any]])->Dict[str,Any]:
+    """Compute the small sector-breadth feature set from compact daily summaries."""
     try:
-        # Breadth must not turn one scan into hundreds of network requests. Use the
-        # daily histories already maintained by the shared cache/bootstrap layer.
-        if not _history_path(sym,"1day").exists():return {}
-        df=history(sym,"1day",allow_network=False)
-        return latest_features(df) if len(df)>=25 else {}
-    except Exception:
-        return {}
+        closes=[float(x) for x in ((summaries.get(sym) or {}).get("recent_closes") or []) if x is not None]
+        if len(closes)<25:return {}
+        close=closes[-1];prev=closes[-2] if len(closes)>=2 else close
+        base20=closes[-21] if len(closes)>=21 else closes[0]
+        last20=closes[-20:];last50=closes[-50:] if len(closes)>=50 else last20
+        sma20=sum(last20)/len(last20);sma50=sum(last50)/len(last50)
+        trend=1 if close>sma20>sma50 else (-1 if close<sma20<sma50 else 0)
+        return {"close":close,"ret1":((close/prev)-1)*100 if prev>0 else 0.0,
+                "ret20":((close/base20)-1)*100 if base20>0 else 0.0,
+                "sma20":sma20,"trend":trend}
+    except Exception:return {}
 
 
 def build_snapshot(ttl_seconds:int=900, max_peers_per_industry:int=20) -> Dict[str,Any]:
+    if not _CACHE["snapshot"]:prime_cache()
     if _CACHE["snapshot"] and time.time()-float(_CACHE["at"])<ttl_seconds:
         return _CACHE["snapshot"]
     with _LOCK:
@@ -41,10 +59,13 @@ def build_snapshot(ttl_seconds:int=900, max_peers_per_industry:int=20) -> Dict[s
             return _CACHE["snapshot"]
         snap={}
         try:
-            for industry,syms in _industry_map().items():
+            groups=_industry_map()
+            all_syms=[s for syms in groups.values() for s in syms[:max_peers_per_industry]]
+            summaries=history_summary_snapshot(all_syms)
+            for industry,syms in groups.items():
                 moves=[];ret20s=[];above20=0;trend_up=0;trend_down=0;n=0
                 for s in syms[:max_peers_per_industry]:
-                    f=_feat(s)
+                    f=_feat(s,summaries)
                     if not f:continue
                     n+=1;moves.append(float(f.get("ret1") or 0));ret20s.append(float(f.get("ret20") or 0))
                     if float(f.get("close") or 0)>float(f.get("sma20") or 1e99):above20+=1
@@ -52,10 +73,17 @@ def build_snapshot(ttl_seconds:int=900, max_peers_per_industry:int=20) -> Dict[s
                     if tr>0:trend_up+=1
                     elif tr<0:trend_down+=1
                 if n:
-                    snap[industry]={"industry":industry,"sample":n,"members":len(syms),"median_move_pct":round(statistics.median(moves),3) if moves else 0.0,"median_ret20_pct":round(statistics.median(ret20s),3) if ret20s else 0.0,"positive_pct":round(100*sum(1 for x in moves if x>0)/n,1),"above_sma20_pct":round(100*above20/n,1),"trend_up_pct":round(100*trend_up/n,1),"trend_down_pct":round(100*trend_down/n,1)}
+                    snap[industry]={"industry":industry,"sample":n,"members":len(syms),
+                        "median_move_pct":round(statistics.median(moves),3) if moves else 0.0,
+                        "median_ret20_pct":round(statistics.median(ret20s),3) if ret20s else 0.0,
+                        "positive_pct":round(100*sum(1 for x in moves if x>0)/n,1),
+                        "above_sma20_pct":round(100*above20/n,1),"trend_up_pct":round(100*trend_up/n,1),
+                        "trend_down_pct":round(100*trend_down/n,1)}
         except Exception as exc:
             health("sector_context","WARN",str(exc)[:180])
         _CACHE["at"]=time.time();_CACHE["snapshot"]=snap
+        if snap:set_state("sector_context_snapshot",{"captured_at":now_iso(),"snapshot":snap,
+            "policy":"V686_COMPACT_HISTORY_SUMMARY_INDUSTRY_BREADTH"})
         return snap
 
 
@@ -66,7 +94,8 @@ def context(symbol:str, side:str="LONG", build_if_missing:bool=True) -> Dict[str
     if not snap and build_if_missing:
         snap=build_snapshot()
     s=snap.get(industry) or {}
-    f=_feat(sym)
+    summaries=history_summary_snapshot([sym])
+    f=_feat(sym,summaries)
     if not s or not f:
         return {"status":"UNKNOWN","industry":industry,"reason":"sector peer snapshot not ready; scanner does not block to rebuild it"}
     sign=1 if side.upper()=="LONG" else -1
