@@ -1,16 +1,29 @@
 # PS Scanner handoff
 
-Current source version: **6.8.8**.
+Current source version: **6.8.9**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
 
-## v6.8.8 Global-to-India runtime fairness
+## v6.8.9 final product integration pass
 
-The real Mac v6.8.7 install succeeded and proved the passive adaptive-algorithm cache: /api/algorithm returned in about 0.67 seconds with cache_ready=true and no deep institutional payload. Performance still degraded at the unchanged 2.5-second budget after 30 rows and health's optional DB snapshot was interrupted while market_snapshot was IDLE.
+The real-Mac v6.8.8 upgrade succeeded: checksum/integrity passed, 311 local tests passed, Groww stayed CONNECTED, v6 data/ledger was preserved, history-summary backfill indexed 4,936 files, institutional compact state was READY, and the algorithm cache was READY.
 
-v6.8.8 fixes the remaining independent hot path: the five-minute Global->India worker previously reparsed detailed daily history and rebuilt pandas features for the entire NSE equity universe, including weekends. It now screens every NSE equity from the compact history-summary index using a necessary-condition upper bound, then performs detailed history work only for symbols that can still satisfy the unchanged score gate. There is no Top-N universe cap or gate relaxation. Cooperative yields and summary-vs-detail runtime telemetry are added.
+The v6.8.8 validator returned ok=true. Passive algorithm status was ~9ms internally and performance completed all 196 CLOSED rows on idx_recs_state_closed_perf_cover in ~50ms during validation. A later manual health request during simultaneous market_snapshot HISTORY_SUMMARY and Global->India FULL_BREADTH_SUMMARY_PREFILTER work still took ~3s and interrupted its optional DB snapshot. This isolated the final runtime contention to duplicated background summary work plus health still opening a live DB snapshot.
 
-See `RELEASE_v6.8.8.md` and `ARCHITECTURE_AUDIT_v6.8.8.md`.
+v6.8.9 makes /api/health DB-free on the request path. A background health-snapshot worker produces the execution-critical DB observation; a stale snapshot explicitly fails execution closed. The persisted full-NSE history-summary observation is shared in memory for a short TTL, preventing duplicate 3k+ symbol decode passes by overlapping workers.
+
+Final product changes:
+- one-click sanitized Export All Logs bundle from the UI;
+- explicit book-specific tandem evidence profiles, including industry-aware oil/gold/silver/copper/USDINR/global-sector context;
+- institutional evidence is never a standalone trade trigger;
+- Weekly, ETF and International initial slates target Monday 09:00 IST;
+- Monthly initial slate targets 09:00 IST on the first NSE trading day;
+- initial identities never disappear or rank-replace;
+- later candidates may append only under stricter score + CONFIRMED/STRONG tandem evidence, with daily/period bounds;
+- Global->India is a weekly prediction ledger; bearish weekly records are research-only for direct execution;
+- Indian SHORT execution remains same-day MIS with hard exit 15:00 IST.
+
+See `RELEASE_v6.8.9.md` and `ARCHITECTURE_AUDIT_v6.8.9.md`.
 
 ## v6.8.7 passive adaptive-algorithm cache
 

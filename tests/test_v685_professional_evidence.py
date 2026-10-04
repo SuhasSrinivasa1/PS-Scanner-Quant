@@ -14,7 +14,7 @@ from psscanner_quant.trade_intelligence import evaluate
 
 class V685ProfessionalEvidenceTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.8")
+        self.assertEqual(VERSION, "6.8.9")
 
     def test_benchmark_relative_strength_uses_supplied_nifty_series(self):
         idx=pd.date_range("2026-01-01", periods=40, freq="D")

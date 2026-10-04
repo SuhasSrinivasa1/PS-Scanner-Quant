@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
 from .constants import IST, GLOBAL_INDIA_FREEZE_TIME, SHORT_HARD_EXIT
@@ -128,7 +128,7 @@ def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
 
 
 def build_global_india_board() -> Dict[str,Any]:
-    started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now);g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
+    started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now);week_key=(now.date()-timedelta(days=now.weekday())).isoformat();g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
     settings=load_settings();max_side=max(1,min(10,int(settings.get('global_india_max_per_side',5))))
     syms=full_nse_symbols()
     meta={str(x.get('symbol') or '').upper():x for x in universe()}
@@ -151,7 +151,7 @@ def build_global_india_board() -> Dict[str,Any]:
 
     set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':True,'status':'DETAIL_ENRICHMENT',
         'stage':'DETAIL_ENRICHMENT','summary_evaluated':len(syms),'summary_ready':summary_ready,
-        'detail_candidates':len(detail_plan),'target_session':target.isoformat(),'at':now_iso(),
+        'detail_candidates':len(detail_plan),'target_session':target.isoformat(),'week_key':week_key,'at':now_iso(),
         'policy':'FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP'})
 
     candidates=[];detail_parsed=0
@@ -198,29 +198,60 @@ def build_global_india_board() -> Dict[str,Any]:
              'detail_parsed':detail_parsed,'detail_parse_ratio':round(detail_parsed/max(1,len(syms)),4),
              'cooperative_yield':True,'elapsed_seconds':round(time.monotonic()-started,2),
              'policy':'FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP'}
-    board={'generated_at':now_iso(),'target_session':target.isoformat(),'freeze_time_ist':'09:00','state':'FROZEN' if is_regular_trading_day(now.date()) and now.date()==target and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME else 'PROVISIONAL_OVERNIGHT','long':[x for x in candidates if x['side']=='LONG'][:max_side],'short':[x for x in candidates if x['side']=='SHORT'][:max_side],'global_context_generated_at':g.get('generated_at'),'global_coverage':g.get('coverage',len(moves)),'policy':'GLOBAL_MARKETS_TO_INDIA_OVERNIGHT_SHARED_EVIDENCE_V688','universe_scanned':len(syms),'runtime':runtime}
+    board={'generated_at':now_iso(),'target_session':target.isoformat(),'freeze_time_ist':'09:00','state':'FROZEN' if is_regular_trading_day(now.date()) and now.date()==target and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME else 'PROVISIONAL_OVERNIGHT','long':[x for x in candidates if x['side']=='LONG'][:max_side],'short':[x for x in candidates if x['side']=='SHORT'][:max_side],'global_context_generated_at':g.get('generated_at'),'global_coverage':g.get('coverage',len(moves)),'policy':'GLOBAL_MARKETS_TO_INDIA_WEEKLY_PREDICTION_DAILY_EVIDENCE_V689','week_key':week_key,'universe_scanned':len(syms),'runtime':runtime}
     set_state('global_india_board',board)
     return board
 
 
 def freeze_global_india_board() -> int:
-    from .engine import _insert_rec
-    now=datetime.now(IST);target=_target_trade_date(now)
-    # Freeze only for today's India session once 09:00 has passed. After market close the
-    # board remains provisional for the next trading day.
-    if not (is_regular_trading_day(now.date()) and target==now.date() and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME):return 0
+    from .engine import _insert_rec, period_key, _append_discovery_capacity
+    now=datetime.now(IST);target=_target_trade_date(now);t=now.time().replace(tzinfo=None)
+    # Weekly prediction freeze: first available NSE trading morning at/after 09:00.
+    # If Monday is a holiday or the app was offline, the same week self-heals later
+    # without rewriting or replacing any identity already published.
+    if not (is_regular_trading_day(now.date()) and t>=GLOBAL_INDIA_FREEZE_TIME):return 0
     board=get_state('global_india_board',{}) or build_global_india_board()
-    if str(board.get('target_session'))!=target.isoformat():return 0
     made=0
     for side,key,book in [('LONG','long','GLOBAL_INDIA_LONG'),('SHORT','short','GLOBAL_INDIA_SHORT')]:
+        pk=period_key(book,now)
         with db() as con:
-            exists=con.execute("SELECT COUNT(*) FROM recommendations WHERE book=? AND period_key=?",(book,target.isoformat())).fetchone()[0]
-        if exists:continue
-        for c in board.get(key) or []:
-            rationale={'reasons':['major global-market overnight alignment','industry-driver mapping','Indian stock daily-trend confirmation','shared institutional/technical evidence'],'mapping_type':'SECTOR_AND_CROSS_ASSET_NOT_NAIVE_EQUIVALENT','industry':c.get('industry'),'global_drivers':c.get('drivers'),'driver_cue_pct':c.get('driver_cue_pct'),'combined_cue_pct':c.get('combined_cue_pct'),'target_session':target.isoformat(),'freeze_time_ist':'09:00','data_confidence':c.get('confidence'),'deadline':'15:00 IST same session','learning_policy':'US/global outcomes are research evidence only; no direct Champion promotion without Indian OOS validation.','trade_intelligence':c.get('trade_intelligence'),'institutional_context':c.get('institutional_context'),'evidence_fabric_policy':c.get('evidence_fabric_policy')}
-            _insert_rec(book,c['symbol'],side,c['score'],c['confidence'],c['price'],c['features'],'GLOBAL_OVERNIGHT',['GLOBAL_SECTOR_CUE','GLOBAL_CROSS_ASSET','INDIA_DAILY_CONFIRM'],rationale,exchange='NSE',target_pct_override=c['target_pct'],stop_pct_override=c['stop_pct'],period_key_override=target.isoformat());made+=1
+            rows=[dict(r) for r in con.execute(
+                "SELECT symbol,created_at,rationale_json FROM recommendations WHERE book=? AND period_key=? AND COALESCE(result,'')<>'VOID'",
+                (book,pk),
+            ).fetchall()]
+        existing={str(r.get('symbol') or '').upper() for r in rows}
+        initial=not existing
+        cap=_append_discovery_capacity(book,pk,now)
+        allowance=len(board.get(key) or []) if initial else min(cap.get('remaining_total',0),cap.get('remaining_today',0))
+        if allowance<=0:continue
+        picks=[]
+        for cand in board.get(key) or []:
+            sym=str(cand.get('symbol') or '').upper()
+            if not sym or sym in existing:continue
+            ti=cand.get('trade_intelligence') or {};combo=ti.get('evidence_combination') or {}
+            if not initial:
+                if float(cand.get('score') or 0)<83.0:continue
+                if str(combo.get('combination_state') or '') not in ('CONFIRMED','STRONG'):continue
+            picks.append(cand)
+        for cand in picks[:allowance]:
+            rationale={'reasons':['major global-market alignment','industry-driver mapping','Indian stock daily-trend confirmation','shared institutional/technical evidence'],
+                'mapping_type':'SECTOR_AND_CROSS_ASSET_NOT_NAIVE_EQUIVALENT','industry':cand.get('industry'),
+                'global_drivers':cand.get('drivers'),'driver_cue_pct':cand.get('driver_cue_pct'),'combined_cue_pct':cand.get('combined_cue_pct'),
+                'target_session_reference':target.isoformat(),'week_key':pk,'freeze_deadline_ist':'MONDAY_09:00',
+                'data_confidence':cand.get('confidence'),'prediction_horizon':'NSE_TRADING_WEEK',
+                'selection_phase':'INITIAL_FREEZE' if initial else 'APPEND_DISCOVERY','append_only':True,
+                'initial_frozen_slate_preserved':True,'no_rank_replacement':True,
+                'short_execution_policy':'BEARISH_WEEKLY_RESEARCH_MAY_ONLY_EXECUTE_AS_SAME_DAY_MIS_WITH_15:00_EXIT',
+                'learning_policy':'Global outcomes are research evidence only; no direct Champion promotion without Indian OOS validation.',
+                'trade_intelligence':ti,'institutional_context':cand.get('institutional_context'),
+                'evidence_fabric_policy':cand.get('evidence_fabric_policy'),'publication_policy_version':'V689_GLOBAL_INDIA_WEEKLY_APPEND_ONLY'}
+            rid=_insert_rec(book,cand['symbol'],side,cand['score'],cand['confidence'],cand['price'],cand['features'],
+                'GLOBAL_WEEKLY',['GLOBAL_SECTOR_CUE','GLOBAL_CROSS_ASSET','INDIA_DAILY_CONFIRM'],rationale,
+                exchange='NSE',target_pct_override=cand['target_pct'],stop_pct_override=cand['stop_pct'],period_key_override=pk)
+            if rid:made+=1;existing.add(str(cand['symbol']).upper())
     if made:
-        board=dict(board);board['state']='FROZEN';board['frozen_at']=now_iso();set_state('global_india_board',board)
+        board=dict(board);board['state']='WEEKLY_FROZEN_APPEND_ONLY';board['frozen_at']=board.get('frozen_at') or now_iso()
+        board['week_key']=period_key('GLOBAL_INDIA_LONG',now);set_state('global_india_board',board)
     return made
 
 

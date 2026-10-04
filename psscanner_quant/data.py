@@ -34,6 +34,8 @@ _LIQUIDITY_RANK_CACHE = {"at": 0.0, "symbols": []}
 _LIQUIDITY_RANK_LOCK = RLock()
 _LTP_CACHE = {"prices": {}, "updated": {}}
 _LTP_LOCK = RLock()
+_HISTORY_SUMMARY_CACHE = {"at":0.0,"symbols_key":None,"data":{}}
+_HISTORY_SUMMARY_LOCK = RLock()
 
 GLOBAL_UNIVERSE = [
     "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","BRK-B","JPM","V","MA","LLY","WMT","ORCL","NFLX","COST","XOM","JNJ","PG",
@@ -524,9 +526,20 @@ def _upsert_history_summary(path: Path, symbol: str, interval: str, candles: Lis
         health("history_summary","WARN",f"{symbol} {interval}: {str(exc)[:180]}")
 
 
-def history_summary_snapshot(symbols: Optional[Iterable[str]]=None) -> Dict[str,Dict[str,Any]]:
-    """Read one compact snapshot for full-breadth consumers with no candle-file parsing."""
+def history_summary_snapshot(symbols: Optional[Iterable[str]]=None, ttl_seconds: float=30.0) -> Dict[str,Dict[str,Any]]:
+    """Read/reuse one compact full-breadth snapshot with no candle-file parsing.
+
+    v6.8.9 makes the persisted history-summary observation shareable across market,
+    regime, sector and Global->India workers. A short in-memory TTL prevents duplicate
+    3k-symbol SQLite+JSON decode passes when workers overlap.
+    """
     wanted={str(s).upper() for s in (symbols or []) if s}
+    key=tuple(sorted(wanted)) if wanted and len(wanted)<=400 else ("FULL",)
+    now=time.monotonic()
+    with _HISTORY_SUMMARY_LOCK:
+        cached=dict(_HISTORY_SUMMARY_CACHE.get("data") or {})
+        if cached and _HISTORY_SUMMARY_CACHE.get("symbols_key")==key and now-float(_HISTORY_SUMMARY_CACHE.get("at") or 0)<=max(0.0,float(ttl_seconds)):
+            return {k:dict(v) for k,v in cached.items()}
     out:Dict[str,Dict[str,Any]]={}
     try:
         with db(timeout_seconds=.5) as con:
@@ -554,9 +567,17 @@ def history_summary_snapshot(symbols: Optional[Iterable[str]]=None) -> Dict[str,
             elif interval=="5minute":
                 rec["intraday_rows"]=rows
             rec["updated_at"]=r[5]
+        with _HISTORY_SUMMARY_LOCK:
+            _HISTORY_SUMMARY_CACHE["at"]=time.monotonic()
+            _HISTORY_SUMMARY_CACHE["symbols_key"]=key
+            _HISTORY_SUMMARY_CACHE["data"]={k:dict(v) for k,v in out.items()}
         return out
     except Exception as exc:
         health("history_summary","WARN",f"snapshot: {str(exc)[:180]}")
+        with _HISTORY_SUMMARY_LOCK:
+            cached=dict(_HISTORY_SUMMARY_CACHE.get("data") or {})
+            if cached and _HISTORY_SUMMARY_CACHE.get("symbols_key")==key:
+                return {k:dict(v) for k,v in cached.items()}
         return {}
 
 

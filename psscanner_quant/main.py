@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .broker import broker
@@ -38,6 +38,9 @@ from .cross_market import board_payload as global_india_board_payload
 from .evidence_fabric import status as evidence_fabric_status
 from .institutional_intelligence import cached_status as institutional_status, point_in_time_history as institutional_history
 from .trading_algorithm import status as algorithm_status, history as algorithm_history, prime_cache as prime_algorithm_cache
+from .health_snapshot import status as health_db_snapshot_status, refresh as refresh_health_db_snapshot
+from .support_bundle import build_support_bundle
+from .evidence_policy import profiles as evidence_profiles
 
 app=FastAPI(title=APP_NAME,version=VERSION)
 
@@ -57,7 +60,7 @@ class SettingsPatch(BaseModel):
 
 @app.on_event("startup")
 def _startup():
-    init_db();seed_library();prime_algorithm_cache();engine.start()
+    init_db();seed_library();prime_algorithm_cache();refresh_health_db_snapshot();engine.start()
 
 @app.on_event("shutdown")
 def _shutdown():engine.stop()
@@ -140,47 +143,22 @@ def groww_status(refresh: bool=False):
 
 @app.get("/api/health")
 def health():
-    started=time.monotonic();now=datetime.now(IST);today=now.date().isoformat()
+    """Purely passive health payload backed by the background DB snapshot producer."""
+    started=time.monotonic();now=datetime.now(IST)
     market=is_regular_trading_day(now.date()) and MARKET_OPEN<=now.time().replace(tzinfo=None)<=MARKET_CLOSE
-    recent=[];recs=[];decisions=[];state={};order_count=None;db_error=None
-    fundamentals={"status":"BOUNDED_SNAPSHOT_UNAVAILABLE","mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE"}
-    events={"status":"BOUNDED_SNAPSHOT_UNAVAILABLE","policy":"Only persisted timestamped events are used. Missing macro data remains UNKNOWN rather than assumed safe."}
-    state_keys=["last_regime","global_context","last_research_cycle","universe_status","full_breadth_discovery",
-                "daily_history_warm_status","last_intraday_history_warm","live_price_cache_status",
-                "position_reconciliation","last_verified_backup"]+["scan_status_"+b for b in BOOKS]
+    snap=health_db_snapshot_status();state=dict(snap.get("state") or {})
+    snapshot_age=None
     try:
-        with db(timeout_seconds=.20) as con:
-            deadline=time.monotonic()+1.0
-            con.set_progress_handler(lambda: 1 if time.monotonic()>deadline else 0,1000)
-            # Execution-critical cached fields come first. If optional telemetry later
-            # exhausts the passive budget, health still retains truthful fail-closed
-            # order-count and position-reconciliation state.
-            order_count=int(con.execute(
-                "SELECT COUNT(*) FROM orders WHERE substr(created_at,1,10)=? AND state NOT IN ('FAILED','CANCELLED')",(today,)
-            ).fetchone()[0])
-            marks=",".join("?" for _ in state_keys)
-            for row in con.execute(f"SELECT key,value_json FROM system_state WHERE key IN ({marks})",tuple(state_keys)).fetchall():
-                try:state[str(row[0])]=json.loads(row[1] or "{}")
-                except Exception:state[str(row[0])]={}
-            recent=[dict(r) for r in con.execute("SELECT ts,component,level,message FROM health_events ORDER BY id DESC LIMIT 30").fetchall()]
-            recs=con.execute("SELECT book,state,COUNT(*) n FROM recommendations GROUP BY book,state").fetchall()
-            decisions=con.execute("SELECT decision,COUNT(*) FROM trade_decisions WHERE ts>=datetime('now','-1 day') GROUP BY decision").fetchall()
-            f=con.execute("SELECT COUNT(*),COUNT(DISTINCT symbol),MIN(asof),MAX(asof) FROM fundamental_snapshots").fetchone()
-            e=con.execute("SELECT COUNT(*),SUM(CASE WHEN starts_at>=? THEN 1 ELSE 0 END) FROM market_events",(now_iso(),)).fetchone()
-            fundamentals={
-                "snapshots":int(f[0] or 0),"symbols":int(f[1] or 0),"first_asof":f[2],"last_asof":f[3],
-                "mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE","bounded":True,
-                "historical_backtest_policy":"Only snapshots captured by the decision timestamp are eligible; current fundamentals are never backfilled into the past.",
-            }
-            events={
-                "total_events":int(e[0] or 0),"future_events":int(e[1] or 0),"bounded":True,
-                "policy":"Only persisted timestamped events are used. Missing macro data remains UNKNOWN rather than assumed safe.",
-            }
-    except Exception as exc:
-        db_error=str(exc)[:160]
-        if not recent:recent=[{"ts":now_iso(),"component":"health","level":"WARN","message":"bounded DB snapshot unavailable: "+db_error}]
+        refreshed=datetime.fromisoformat(str(snap.get("refreshed_at")))
+        refreshed=refreshed if refreshed.tzinfo else refreshed.replace(tzinfo=IST)
+        snapshot_age=max(0.0,(now-refreshed).total_seconds())
+    except Exception:pass
+    snapshot_fresh=bool(snap.get("ready") and snapshot_age is not None and snapshot_age<=20.0)
+    order_count=snap.get("order_count") if snapshot_fresh else None
+    fundamentals=snap.get("fundamentals") or {"status":"WARMING","mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE"}
+    events=snap.get("events") or {"status":"WARMING"}
     history_cached=history_control_status_cached()
-    execution_cached=execution_readiness_cached_snapshot(order_count,state.get("position_reconciliation") or {})
+    execution_cached=execution_readiness_cached_snapshot(order_count,(state.get("position_reconciliation") or {}) if snapshot_fresh else {})
     workers=engine.worker_status_cached()
     evidence={
         "fundamentals":fundamentals,
@@ -199,33 +177,19 @@ def health():
             "experiment_governance":True,"evidence_gated_cohorts":True,"nonblocking_health":True,
             "shared_evidence_fabric":True,"institutional_intelligence":True,"adaptive_algorithm":True,
             "accuracy_target_is_evidence_gated_not_guaranteed":True},
-        "reliability_patch":{"version":"6.4.9","name":"RECOVERY_EXECUTION_AND_PREPERIOD_FREEZE","five_pick_contract_books":["WEEKLY","MONTHLY","ETF","INTERNATIONAL"],
-            "worker_watchdog":True,"staged_recovery":True,"preperiod_freeze":True,"intraday_bootstrap":True,"bounded_international_transport":True},
-        "health_reliability_patch":{"version":"6.7.1","name":"NONBLOCKING_HEALTH_AND_VALIDATION","health_network_calls":False,
-            "health_waits_for_history_pacer":False,"bounded_health_db_reads":True},
-        "sanity_reliability_patch":{"version":"6.7.2","name":"BOUNDED_RUNTIME_SANITY_AND_BACKUP_RESTORE_DEEP_CHECK",
-            "inline_quick_check":False,"runtime_query_budget_seconds":1.5,"deep_verification":"SQLITE_BACKUP_RESTORE_QUICK_CHECK"},
-        "execution_cache_patch":{"version":"6.7.3","background_static_ip_probe":True,"public_ip_fallback":True,
-            "health_single_db_snapshot":True,"position_mismatch_fail_closed":True},
-        "health_snapshot_patch":{"version":"6.8.2","name":"INDEXED_EXECUTION_CRITICAL_HEALTH_SNAPSHOT",
-            "execution_fields_first":True,"decision_window_indexed":True,"order_day_indexed":True,
-            "static_ip_policy":"EXECUTION_ONLY"},
-        "professional_evidence_patch":{"version":"6.8.5","name":"POINT_IN_TIME_DISCLOSURE_DELIVERY_DERIVATIVES_DEPTH_AND_BENCHMARK",
-            "nse_delivery":True,"nse_pit_insider":True,"nse_regulatory_disclosures":True,
-            "groww_fno_positioning":True,"nifty_relative_strength":True,"live_displayed_depth_gate":True,
-            "new_research_evidence_scoring":"SHADOW_UNTIL_INCREMENTAL_OOS_VALIDATED"},
         "performance_reliability_patch":{"version":"6.8.1","name":"BOUNDED_PERFORMANCE_ANALYTICS",
             "api_db_timeout_seconds":.5,"api_query_budget_seconds":2.5,"network_calls":False,
             "single_snapshot":True,"narrow_projection":True,"deep_learning_uses_passive_budget":False},
-        "algorithm_cache_patch":{"version":"6.8.7","name":"PASSIVE_COMPACT_ALGORITHM_STATUS",
-            "api_rebuilds_snapshot":False,"network_calls":False,"deep_institutional_payload":False,
-            "offline_installer_prime":True,"background_refresh_only":True},
-        "runtime_fairness_patch":{"version":"6.8.8","name":"GLOBAL_INDIA_SUMMARY_PREFILTER_AND_COOPERATIVE_YIELD",
-            "full_nse_first_pass":True,"top_n_universe_cap":False,"necessary_condition_only":True,
-            "detailed_history_only_for_possible_survivors":True,"cooperative_yield":True},
-        "orchestration_patch":{"version":"6.8.0","policy":"V680_ONE_OBSERVATION_MANY_CONSUMERS",
-            "scanner_frequency_reduced":False,"shared_priority_quotes":True,"shared_news":True,
-            "shared_events":True,"shared_institutional":True,"shared_international_transport":True},
+        "recovery_execution_patch":{"version":"6.4.9","name":"RECOVERY_EXECUTION_AND_PREPERIOD_FREEZE",
+            "gate_relaxation":False,"static_ip_policy":"EXECUTION_ONLY"},
+        "health_snapshot_patch":{"version":"6.8.9","name":"BACKGROUND_DB_SNAPSHOT_PASSIVE_HEALTH",
+            "request_path_db_connections":0,"background_refresh":True,"fail_closed_without_snapshot":True},
+        "professional_evidence_patch":{"version":"6.8.9","name":"BOOK_SPECIFIC_TANDEM_EVIDENCE_COMBINATIONS",
+            "institutional_standalone_trigger":False,"commodity_fx_dependency_mapping":True,
+            "combination_label_shadow_until_oos_validated":True},
+        "runtime_fairness_patch":{"version":"6.8.9","name":"SHARED_HISTORY_SUMMARY_CACHE_AND_BACKGROUND_HEALTH_SNAPSHOT",
+            "full_nse_first_pass":True,"top_n_universe_cap":False,"shared_summary_ttl_seconds":30,
+            "passive_health_db_free":True},
         "generated_at":now_iso(),"market_open":market,"engine_alive":bool(engine.thread and engine.thread.is_alive()),"engine_last_error":engine.last_error,
         "workers":workers,"groww":broker.status_cached(),"static_ip":broker.static_ip_status_cached(),
         "research":{"recommendations_require_static_ip":False,"static_ip_scope":"ORDER_EXECUTION_ONLY","status":"ACTIVE" if bool(engine.thread and engine.thread.is_alive()) else "ENGINE_STOPPED"},
@@ -234,12 +198,34 @@ def health():
         "regime":state.get("last_regime",{}),"global_context":state.get("global_context",{}),
         "last_research_cycle":state.get("last_research_cycle",{}),"scan_status":{b:state.get("scan_status_"+b,{}) for b in BOOKS},
         "evidence":evidence,
-        "recommendation_counts":[{"book":r[0],"state":r[1],"n":r[2]} for r in recs],"decision_counts_24h":{r[0]:r[1] for r in decisions},
-        "recent_health_events":recent,
+        "recommendation_counts":list(snap.get("recommendation_counts") or []),
+        "decision_counts_24h":dict(snap.get("decision_counts_24h") or {}),
+        "recent_health_events":list(snap.get("recent") or []),
         "health_contract":{"passive":True,"network_calls":False,"history_pacer_nonblocking":True,
-            "db_connections":1,"db_snapshot_error":db_error,"db_wall_clock_budget_seconds":1.0,
+            "request_path_db_connections":0,"db_connections":0,
+            "background_snapshot_ready":bool(snap.get("ready")),
+            "background_snapshot_refreshed_at":snap.get("refreshed_at"),
+            "background_snapshot_age_seconds":round(snapshot_age,2) if snapshot_age is not None else None,
+            "background_snapshot_fresh":snapshot_fresh,
+            "background_snapshot_max_age_seconds":20.0,
+            "background_snapshot_elapsed_ms":snap.get("elapsed_ms"),
+            "background_snapshot_last_error":snap.get("last_error"),
+            "db_snapshot_error":None if snap.get("ready") else (snap.get("last_error") or "health snapshot warming"),
             "execution_snapshot_available":order_count is not None,
+            "stale_snapshot_blocks_execution":True,
             "elapsed_ms":round((time.monotonic()-started)*1000.0,1)}}
+
+@app.get("/api/evidence/profiles")
+def evidence_profile_api():
+    return evidence_profiles()
+
+@app.get("/api/support/export")
+def support_export():
+    payload,filename=build_support_bundle()
+    return Response(content=payload,media_type="application/zip",headers={
+        "Content-Disposition":f'attachment; filename="{filename}"',
+        "Cache-Control":"no-store",
+    })
 
 
 @app.get("/api/sanity")
@@ -420,12 +406,18 @@ def international_board():
             "us_recommendation_side":"LONG_ONLY",
             "us_horizon":"WEEKLY",
             "us_weekly_freeze_et":"after Friday close through Monday pre-open; self-healing recovery if missed",
+            "us_initial_freeze_deadline_ist":"Monday 09:00",
+            "us_append_only_after_initial_freeze":True,
             "us_calls_close_at_us_regular_session_end":False,
             "us_calls_close_at_week_end":True,
             "us_no_replacement_after_contract_complete":True,
+            "us_later_high_conviction_candidates_may_append":True,
             "us_freeze_contract_minimum":5,
             "us_shortage_behavior":"EXPLICIT_RECOVERY_REQUIRED_NEVER_STALE_OR_FABRICATED",
-            "global_to_india_freeze_ist":"09:00",
+            "global_to_india_freeze_ist":"Monday 09:00",
+            "global_to_india_horizon":"NSE_TRADING_WEEK",
+            "global_to_india_append_only":True,
+            "global_to_india_bearish_prediction_execution":"RESEARCH_ONLY_USE_SAME_DAY_MIS_LANE",
             "global_to_india_session_exit_ist":"15:00",
             "mapping":"SECTOR_AND_CROSS_ASSET_DRIVERS",
         },
@@ -539,6 +531,8 @@ def research_framework():
             "OBV_CMF_MFI_ACCUMULATION_DISTRIBUTION_FEATURES",
             "BACKGROUND_PRIORITY_NEWS_AND_EARNINGS_EVENT_PRODUCERS",
             "ADAPTIVE_DAILY_ALGORITHM_VERSIONED_FROM_VALIDATED_CHAMPION_MANIFEST",
+            "BOOK_SPECIFIC_TANDEM_EVIDENCE_COMBINATIONS_WITH_COMMODITY_FX_DEPENDENCIES",
+            "APPEND_ONLY_HORIZON_DISCOVERY_WITH_INITIAL_SLATE_ACCOUNTABILITY",
         ],
         "remaining_data_gaps":[
             "FULL_HISTORICAL_POINT_IN_TIME_FUNDAMENTALS_BEFORE_V620_CAPTURE_DATE",
@@ -547,6 +541,7 @@ def research_framework():
             "AUTHORITATIVE_INDIAN_SECTOR_INDEX_OR_ETF_HISTORY_MAPPING_FOR_EVERY_INDUSTRY",
             "FULL_LEVEL2_DEPTH_AND_MARKET_IMPACT_HISTORY_BEYOND_LIVE_DISPLAYED_GROWW_DEPTH",
         ],
+        "evidence_combinations":evidence_profiles(),
         "data_gap_policy":"Missing evidence is exposed as UNKNOWN and never fabricated or silently treated as a pass.",
     }
 

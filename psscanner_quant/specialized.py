@@ -19,7 +19,7 @@ from .db import db, health, get_state, set_state, now_iso
 from .broker import broker
 from .engine import (_insert_rec, _observe, _publish_frozen, period_key, _target_feasibility, _risk_geometry,
     _period_has_valid_frozen_book, _horizon_freeze_window, _freeze_contract_min, _freeze_contract_count,
-    _horizon_target_context)
+    _horizon_target_context, _append_discovery_capacity, _publish_append_discoveries)
 from .regime import classify
 from .global_context import snapshot as global_snapshot
 from .trade_intelligence import evaluate as evaluate_trade_intelligence
@@ -144,9 +144,16 @@ def run_etf_cycle():
     ctx=_horizon_target_context('ETF',now);pk=str(ctx['period_key']);target_now=ctx.get('target_now') or now;preperiod=bool(ctx.get('preperiod'))
     required=_freeze_contract_min('ETF') or 5;existing=_freeze_contract_count('ETF',pk)
     if existing>=required:
-        contract={'required':required,'published_total':existing,'shortage':0,'recovery_required':False}
-        set_state('scan_status_ETF',{'book':'ETF','running':False,'status':'PERIOD_BOOK_ALREADY_FROZEN','period_key':pk,'contract':contract,'target_period':ctx,'at':now_iso()})
-        return 0
+        appended=0;cap=_append_discovery_capacity('ETF',pk,now)
+        if min(cap.get('remaining_total',0),cap.get('remaining_today',0))>0 and is_regular_trading_day(now.date()) and MARKET_OPEN<=t<=HORIZON_RECOVERY_END:
+            c=scan_etfs(sides=('LONG',),target_now=target_now);_observe('ETF',c,period_key_override=pk)
+            appended=_publish_append_discoveries('ETF',period_key_override=pk,publication_anchor=datetime.now(IST))
+            cap=_append_discovery_capacity('ETF',pk,datetime.now(IST))
+        contract={'required':required,'published_total':existing+appended,'shortage':0,'recovery_required':False,
+                  'initial_slate_immutable':True,'append_only':True,'append_capacity':cap}
+        set_state('scan_status_ETF',{'book':'ETF','running':False,'status':'PERIOD_BOOK_FROZEN_APPEND_ONLY','period_key':pk,
+            'contract':contract,'target_period':ctx,'appended_this_cycle':appended,'at':now_iso()})
+        return appended
 
     normal_research=is_regular_trading_day(now.date()) and HORIZON_RESEARCH_START<=t<=HORIZON_RECOVERY_END
     missed_freeze_recovery=_etf_missed_freeze_recovery_allowed(now,existing,required,preperiod)
@@ -497,51 +504,57 @@ def _daily_bar_age_days(df, local:datetime)->Optional[int]:
 
 
 def run_international_cycle():
-    """Five-name U.S. weekly freeze with pre-week publication and deterministic recovery.
-
-    Uses completed daily bars for pre-week publication. It never treats an empty freeze marker
-    as a completed book, never backfills with stale data, and never lowers trade-intelligence
-    or weekly-capacity gates merely to reach five.
-    """
+    """Frozen U.S. weekly slate plus append-only high-conviction in-week discoveries."""
     started=time.monotonic();now=datetime.now(IST);session=_us_session(now);settings=load_settings();local=now.astimezone(NY)
     week_key,preweek=_international_target_week(local);required=_freeze_contract_min('INTERNATIONAL') or 5
+    existing=_freeze_contract_count('INTERNATIONAL',week_key)
+    append_cap=_append_discovery_capacity('INTERNATIONAL',week_key,now)
+    append_mode=bool(existing>=required and not preweek and min(append_cap.get('remaining_total',0),append_cap.get('remaining_today',0))>0)
+    # Historical preparation contracts remain true: AFTER_FRIDAY_CLOSE_TO_MONDAY_OPEN
+    # and PREWEEK_OR_RECOVERY_RECENT_DAILY_CLOSE describe the data window. v6.8.9
+    # adds append-only in-week discovery without daily replacement.
+    max_longs=required
     stats={'book':'INTERNATIONAL','started_at':now_iso(),'session':session,'week_key':week_key,'inserted':0,'updated_or_closed':0,
-           'side_policy':'LONG_ONLY','holding_policy':'FROZEN_WEEKLY_NO_REPLACEMENT','contract_required':required,'preferred_window':'AFTER_FRIDAY_CLOSE_TO_MONDAY_OPEN',
+           'side_policy':'LONG_ONLY','holding_policy':'INITIAL_FREEZE_PLUS_APPEND_ONLY_NO_REPLACEMENT',
+           'contract_required':required,'preferred_freeze_deadline_ist':'MONDAY_09:00','append_mode':append_mode,
            'running':True,'status':'RECOVERY_STARTING'}
     set_state('scan_status_INTERNATIONAL',stats)
     stats['updated_or_closed']=update_international_books()
     if not settings.get('international_enabled',True):
         stats.update({'status':'DISABLED','running':False,'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)});set_state('scan_status_INTERNATIONAL',stats);return 0
-
-    existing=_freeze_contract_count('INTERNATIONAL',week_key)
     with db() as con:
-        existing_symbols={str(r[0]) for r in con.execute("SELECT symbol FROM recommendations WHERE book='INTERNATIONAL' AND period_key=? AND side='LONG' AND COALESCE(result,'')<>'VOID'",(week_key,)).fetchall()}
-    if existing>=required:
-        freeze_payload={'frozen':True,'contract_complete':True,'required':required,'published_total':existing,'shortage':0,'week_key':week_key,'policy':'V649_PREWEEK_FIVE_PICK_FREEZE_NO_REPLACEMENT'}
-        old=get_state('international_weekly_freeze_'+week_key,{}) or {};freeze_payload['frozen_at']=old.get('frozen_at') or now_iso();set_state('international_weekly_freeze_'+week_key,freeze_payload)
-        stats.update({'status':'WEEKLY_BOOK_FROZEN','running':False,'published':existing,'contract':freeze_payload,'frozen_at':freeze_payload['frozen_at'],'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)});set_state('scan_status_INTERNATIONAL',stats);return 0
+        existing_symbols={str(r[0]) for r in con.execute(
+            "SELECT symbol FROM recommendations WHERE book='INTERNATIONAL' AND period_key=? AND side='LONG' AND COALESCE(result,'')<>'VOID'",(week_key,)
+        ).fetchall()}
+    if existing>=required and not append_mode:
+        freeze_payload={'frozen':True,'contract_complete':True,'required':required,'published_total':existing,'shortage':0,'week_key':week_key,
+                        'initial_slate_immutable':True,'append_only':True,'append_capacity':append_cap,
+                        'policy':'V689_WEEKLY_INITIAL_FREEZE_PLUS_APPEND_ONLY'}
+        old=get_state('international_weekly_freeze_'+week_key,{}) or {};freeze_payload['frozen_at']=old.get('frozen_at') or now_iso()
+        set_state('international_weekly_freeze_'+week_key,freeze_payload)
+        stats.update({'status':'WEEKLY_BOOK_FROZEN_APPEND_ONLY','running':False,'published':existing,'contract':freeze_payload,
+                      'frozen_at':freeze_payload['frozen_at'],'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)})
+        set_state('scan_status_INTERNATIONAL',stats);return 0
 
-    # Normal publication is after Friday close/weekend/Monday pre-open. If that was missed,
-    # recover during the current week from recent completed daily bars rather than staying empty.
-    current_week=_us_week_key(local.date())
-    recovery=(week_key==current_week and not preweek)
-    stats.update({'status':'FETCHING_BOUNDED_DAILY_RECOVERY_DATA','preweek_window':preweek,'recovery_mode':recovery})
+    current_week=_us_week_key(local.date());recovery=(week_key==current_week and not preweek and existing<required)
+    stats.update({'status':'FETCHING_BOUNDED_DAILY_APPEND_DATA' if append_mode else 'FETCHING_BOUNDED_DAILY_RECOVERY_DATA',
+                  'preweek_window':preweek,'recovery_mode':recovery})
     set_state('scan_status_INTERNATIONAL',stats)
     daily=_shared_international_history(US_WEEKLY_UNIVERSE,'1y','1d',600.0)
-    stats['daily_symbols']=len(daily)
-    stats['transport']=get_state('international_batch_transport',{}) or {}
-    stats['status']='SCORING_BOUNDED_DAILY_RECOVERY_DATA'
+    stats['daily_symbols']=len(daily);stats['transport']=get_state('international_batch_transport',{}) or {}
+    stats['status']='SCORING_APPEND_DISCOVERY' if append_mode else 'SCORING_BOUNDED_DAILY_RECOVERY_DATA'
     set_state('scan_status_INTERNATIONAL',stats)
     g=get_state('global_context',{}) or {};regime_state={'regime':'US_WEEKLY','trend_vote':0,'breadth_up_pct':50,'breadth_down_pct':50}
     remaining_sessions=5 if preweek else max(1,5-local.weekday())
-    reserve=float(settings.get('international_weekly_cost_reserve_pct',.50));cap=float(settings.get('international_weekly_target_cap_pct',8.0));min_score=float(settings.get('international_weekly_min_score',78.0));candidates=[];stale=0
+    reserve=float(settings.get('international_weekly_cost_reserve_pct',.50));cap=float(settings.get('international_weekly_target_cap_pct',8.0))
+    base_min=float(settings.get('international_weekly_min_score',78.0));min_score=base_min+(float(settings.get('horizon_append_score_uplift',5.0)) if append_mode else 0.0)
+    candidates=[];stale=0
     for sym in US_WEEKLY_UNIVERSE:
         if sym in existing_symbols:continue
         dd=daily.get(sym)
         if dd is None or len(dd)<120:continue
         age=_daily_bar_age_days(dd,local)
-        if age is None or age<0 or age>5:
-            stale+=1;continue
+        if age is None or age<0 or age>5:stale+=1;continue
         try:px=float(dd['close'].dropna().iloc[-1])
         except Exception:continue
         if px<=0:continue
@@ -554,28 +567,35 @@ def run_international_cycle():
         if score<min_score:continue
         ti=evaluate_trade_intelligence(book='INTERNATIONAL',symbol=sym,side='LONG',features=f,fundamentals={},regime_state=regime_state,candle_info=candles,global_ctx=g,target_pct=geom['target_pct'],stop_pct=geom['stop_pct'],strategy_ids=['US_WEEKLY_TREND','US_WEEKLY_MOMENTUM','US_WEEKLY_LOW_TURNOVER'],data_confidence=.86)
         if ti['decision']!='ELIGIBLE':continue
+        if append_mode and str((ti.get('evidence_combination') or {}).get('combination_state')) not in ('CONFIRMED','STRONG'):continue
         edge=max(0.0,geom['capacity_pct']*min(1.05,max(.65,score/100.0))*.58-reserve)
         candidates.append((edge,score,sym,px,f,candles,ti,geom,age))
-    need=max(0,required-existing);made=0
-    configured_max=max(1,int(settings.get('international_weekly_max_longs',5) or 5))
-    max_longs=required  # a preserved lower legacy setting may not weaken the five-pick contract
-    take=min(need,max_longs)
+    need=max(0,required-existing)
+    take=min(need,max_longs) if not append_mode else min(append_cap.get('remaining_total',0),append_cap.get('remaining_today',0))
+    made=0
     for rank,(edge,score,sym,px,f,candles,ti,geom,age) in enumerate(sorted(candidates,key=lambda x:(x[0],x[1]),reverse=True)[:take],start=existing+1):
         rationale={'reasons':['frozen U.S. weekly LONG opportunity','completed daily trend and multi-week momentum','ranked by expected net weekly edge after turnover/friction reserve'],
             'data_confidence':.86,'candlestick_context':candles,'trade_intelligence':ti,'global_context':g,'session_policy':'US_WEEKLY_FROZEN_LONG_ONLY',
-            'freeze_policy':'V649_PREWEEK_OR_RECOVERY_RECENT_DAILY_CLOSE','week_key':week_key,'remaining_sessions':geom['remaining_sessions'],'capacity_pct':geom['capacity_pct'],
+            'freeze_policy':'V689_MONDAY_0900_INITIAL_PLUS_APPEND_ONLY','week_key':week_key,'remaining_sessions':geom['remaining_sessions'],'capacity_pct':geom['capacity_pct'],
             'cost_reserve_pct':geom['cost_reserve_pct'],'expected_net_target_pct':geom['expected_net_target_pct'],'expected_net_weekly_edge_pct':round(edge,4),
             'weekly_rank':rank,'daily_bar_age_days':age,'selection_objective':'MAX_EXPECTED_NET_WEEKLY_RETURN_AMONG_DATA_VALID_US_UNIVERSE',
-            'turnover_policy':'ONE_FROZEN_ENTRY_PER_SYMBOL_PER_WEEK_NO_REPLACEMENT','target_is_not_guaranteed':True}
-        _insert_rec('INTERNATIONAL',sym,'LONG',score,.78,px,f,'US_WEEKLY',['US_WEEKLY_TREND','US_WEEKLY_MOMENTUM','US_WEEKLY_LOW_TURNOVER'],rationale,exchange='US',target_pct_override=geom['target_pct'],stop_pct_override=geom['stop_pct'],period_key_override=week_key);made+=1
+            'turnover_policy':'ONE_FROZEN_ENTRY_PER_SYMBOL_PER_WEEK_NO_REPLACEMENT','target_is_not_guaranteed':True,
+            'selection_phase':'APPEND_DISCOVERY' if append_mode else 'INITIAL_FREEZE','initial_frozen_slate_preserved':True,'append_only':True}
+        rid=_insert_rec('INTERNATIONAL',sym,'LONG',score,.78,px,f,'US_WEEKLY',['US_WEEKLY_TREND','US_WEEKLY_MOMENTUM','US_WEEKLY_LOW_TURNOVER'],rationale,exchange='US',target_pct_override=geom['target_pct'],stop_pct_override=geom['stop_pct'],period_key_override=week_key)
+        if rid:made+=1
     total=_freeze_contract_count('INTERNATIONAL',week_key);shortage=max(0,required-total);complete=total>=required
-    freeze_payload={'frozen':complete,'contract_complete':complete,'week_key':week_key,'frozen_at':now_iso() if complete else None,'published_this_cycle':made,
+    append_after=_append_discovery_capacity('INTERNATIONAL',week_key,datetime.now(IST))
+    old=get_state('international_weekly_freeze_'+week_key,{}) or {}
+    freeze_payload={'frozen':complete,'contract_complete':complete,'week_key':week_key,
+                    'frozen_at':old.get('frozen_at') or (now_iso() if complete else None),'published_this_cycle':made,
                     'published_total':total,'required':required,'shortage':shortage,'qualified_candidates':len(candidates),'universe':len(US_WEEKLY_UNIVERSE),
-                    'stale_daily_rejects':stale,'recovery_required':not complete,'policy':'V649_PREWEEK_FIVE_PICK_FREEZE_NO_REPLACEMENT'}
+                    'stale_daily_rejects':stale,'recovery_required':not complete,'initial_slate_immutable':True,'append_only':True,
+                    'append_capacity':append_after,'policy':'V689_MONDAY_0900_INITIAL_PLUS_APPEND_ONLY'}
     set_state('international_weekly_freeze_'+week_key,freeze_payload)
-    status='CONTRACT_FULFILLED' if complete else 'FREEZE_CONTRACT_SHORTAGE_RECOVERY_REQUIRED'
+    status=('APPEND_DISCOVERY_ADDED' if append_mode and made else 'APPEND_DISCOVERY_NO_NEW_HIGH_CONVICTION') if append_mode else ('CONTRACT_FULFILLED' if complete else 'FREEZE_CONTRACT_SHORTAGE_RECOVERY_REQUIRED')
     freeze_payload['reason']=None if complete else ('NO_FRESH_DAILY_DATA' if not daily else ('FEWER_THAN_FIVE_DATA_VALID_US_CANDIDATES' if len(candidates)<required else 'QUALIFIED_CANDIDATES_ACCUMULATING'))
     stats.update({'inserted':made,'published':total,'qualified_candidates':len(candidates),'status':status,'contract':freeze_payload,
                   'running':False,'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)})
     set_state('scan_status_INTERNATIONAL',stats);return made
+
 

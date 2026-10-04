@@ -28,7 +28,7 @@ class V680EvidenceFabricAlgorithmTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_version_and_lifecycle(self):
-        self.assertEqual(VERSION,"6.8.8")
+        self.assertEqual(VERSION,"6.8.9")
         self.assertEqual(lifecycle_payload()["policy_version"],
                          "V680_SHARED_EVIDENCE_FABRIC_ADAPTIVE_ALGORITHM")
 

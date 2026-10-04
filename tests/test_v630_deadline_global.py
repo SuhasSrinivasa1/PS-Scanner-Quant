@@ -17,11 +17,11 @@ class V630DeadlineGlobalTests(unittest.TestCase):
         self.assertEqual(engine.period_key('CIRCUIT_NEXTDAY',before),'2026-09-25')
         self.assertEqual(engine.period_key('CIRCUIT_NEXTDAY',after),'2026-09-28')
 
-    def test_global_india_period_rolls_after_user_cutoff(self):
+    def test_global_india_prediction_period_is_weekly_while_short_cutoff_stays_execution_only(self):
         before=datetime(2026,9,25,14,59,tzinfo=IST)
         after=datetime(2026,9,25,15,1,tzinfo=IST)
-        self.assertEqual(engine.period_key('GLOBAL_INDIA_LONG',before),'2026-09-25')
-        self.assertEqual(engine.period_key('GLOBAL_INDIA_SHORT',after),'2026-09-28')
+        self.assertEqual(engine.period_key('GLOBAL_INDIA_LONG',before),'2026-09-21')
+        self.assertEqual(engine.period_key('GLOBAL_INDIA_SHORT',after),'2026-09-21')
 
     def test_short_deadline_gate_rejects_too_late(self):
         f={'atr_pct':0.5,'ret5':-1.0,'ret20':-1.5}

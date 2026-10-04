@@ -25,7 +25,7 @@ class V673ExecutionCacheTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_version_and_policy(self):
-        self.assertEqual(VERSION,"6.8.8")
+        self.assertEqual(VERSION,"6.8.9")
         self.assertEqual(lifecycle_payload()["policy_version"],"V680_SHARED_EVIDENCE_FABRIC_ADAPTIVE_ALGORITHM")
 
     def test_public_ip_probe_falls_back_and_populates_cache(self):
@@ -49,17 +49,20 @@ class V673ExecutionCacheTests(unittest.TestCase):
         self.assertNotIn("static_ip_status()",src)
         self.assertNotIn("broker.status()",src)
 
-    def test_health_uses_one_bounded_db_snapshot(self):
+    def test_health_uses_zero_request_path_db_connections(self):
         src=inspect.getsource(main.health)
-        self.assertIn('"db_connections":1',src)
+        self.assertIn('"db_connections":0',src)
+        self.assertIn('"request_path_db_connections":0',src)
+        self.assertIn("health_db_snapshot_status",src)
         self.assertIn("execution_readiness_cached_snapshot",src)
+        self.assertNotIn("with db(",src)
         self.assertNotIn("_cached_states(",src)
         self.assertNotIn("_bounded_evidence_db(",src)
         started=time.monotonic()
         out=main.health()
         self.assertLess(time.monotonic()-started,2.0)
-        self.assertEqual(out["version"],"6.8.8")
-        self.assertEqual(out["health_contract"]["db_connections"],1)
+        self.assertEqual(out["version"],"6.8.9")
+        self.assertEqual(out["health_contract"]["db_connections"],0)
         self.assertFalse(out["health_contract"]["network_calls"])
 
     def test_position_mismatch_remains_fail_closed_with_explicit_semantics(self):

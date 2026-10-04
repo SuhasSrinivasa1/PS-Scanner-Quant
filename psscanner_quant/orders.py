@@ -146,7 +146,10 @@ def _merge_permission(ready:Dict[str,Any], permission:Dict[str,Any])->Dict[str,A
 
 
 def create_preview(rec_id:str)->Dict[str,Any]:
-    rec=_rec(rec_id);ready=execution_readiness(rec)
+    rec=_rec(rec_id)
+    if str(rec.get("book") or "").upper()=="GLOBAL_INDIA_SHORT":
+        raise RuntimeError("Weekly Global-to-India bearish predictions are research-only. Indian SHORT execution must originate from a same-day MIS lane and hard-exit by 15:00 IST.")
+    ready=execution_readiness(rec)
     meta=instrument(rec["symbol"]);tick=float((meta or {}).get("tick_size") or .05)
     px=live_prices([rec["symbol"]]).get(rec["symbol"],float(rec["current_price"])) if rec.get("exchange")=="NSE" else float(rec["current_price"])
     plan=order_plan(rec["side"],float(px),tick,stop_price=float(rec.get('stop_price') or 0) or None)
@@ -174,7 +177,10 @@ def execute_preview(token:str)->Dict[str,Any]:
     d=dict(r)
     if int(d["consumed"]):raise ValueError("Preview already consumed")
     if datetime.now(IST)>datetime.fromisoformat(d["expires_at"]):raise ValueError("Preview expired")
-    payload=json.loads(d["payload_json"]);rec=_rec(d["recommendation_id"]);ready=execution_readiness(rec)
+    payload=json.loads(d["payload_json"]);rec=_rec(d["recommendation_id"])
+    if str(rec.get("book") or "").upper()=="GLOBAL_INDIA_SHORT":
+        raise RuntimeError("Weekly Global-to-India bearish predictions are research-only and cannot be executed directly.")
+    ready=execution_readiness(rec)
     plan=payload["plan"]
     quality=_quote_execution_quality(rec['symbol'],rec['side'],float(rec.get('current_price') or payload.get("decision_price") or 0),int(plan.get('quantity') or 0))
     if quality.get('hard_block'):

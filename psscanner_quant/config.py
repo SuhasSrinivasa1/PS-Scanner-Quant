@@ -114,6 +114,16 @@ _DEFAULTS: Dict[str, Any] = {
     "execution_min_net_edge_rupees": 0.0,
     "execution_integrity_worker_interval_seconds": 120,
     "backup_worker_interval_seconds": 3600,
+    "health_snapshot_worker_interval_seconds": 5,
+    # v6.8.9 append-only horizon discoveries: initial slates remain immutable while
+    # genuinely stronger later evidence may add identities without replacing old calls.
+    "weekly_append_max_total": 5,
+    "monthly_append_max_total": 8,
+    "etf_append_max_total": 3,
+    "international_append_max_total": 3,
+    "global_india_append_max_total": 5,
+    "horizon_append_max_per_day": 1,
+    "horizon_append_score_uplift": 5.0,
     "cohort_min_samples_for_live_use": 50,
     "cohort_max_wilson_width_for_live_use": 0.30,
 }

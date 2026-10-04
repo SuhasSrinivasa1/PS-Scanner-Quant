@@ -30,6 +30,7 @@ from .trading_calendar import (period_end_date as exchange_period_end_date, rema
 from .sector_context import context as sector_context, context_cached as sector_context_cached, prime_cache as prime_sector_cache
 from .event_calendar import risk_context as event_risk_context, refresh_symbol_event, seed_official_calendar
 from .evidence_fabric import publish as fabric_publish, priority_symbols as fabric_priority_symbols, symbol_context as fabric_symbol_context
+from .health_snapshot import refresh as refresh_health_db_snapshot
 from .institutional_intelligence import refresh as institutional_refresh
 from .production_integrity import (
     common_audit_context, make_audit_envelope, record_scan_run, seed_release_experiment, maybe_daily_backup,
@@ -78,8 +79,8 @@ def period_key(book: str, now: Optional[datetime] = None) -> str:
         t=now.time().replace(tzinfo=None)
         return (now.date() if is_regular_trading_day(now.date()) and t < SHORT_HARD_EXIT else next_trading_day(now.date())).isoformat()
     if book in ("GLOBAL_INDIA_LONG", "GLOBAL_INDIA_SHORT"):
-        t=now.time().replace(tzinfo=None)
-        return (now.date() if is_regular_trading_day(now.date()) and t < SHORT_HARD_EXIT else next_trading_day(now.date())).isoformat()
+        monday=now.date()-timedelta(days=now.weekday())
+        return monday.isoformat()
     return now.date().isoformat()
 
 
@@ -673,6 +674,112 @@ def _publish_frozen(book: str, min_obs: int = 3, per_side: int = 5, publication_
     return made
 
 
+
+def _append_discovery_capacity(book:str, pk:str, now:Optional[datetime]=None) -> Dict[str,int]:
+    """Return append capacity without ever changing the initial frozen contract."""
+    b=str(book).upper();now=now or datetime.now(IST);settings=load_settings()
+    limits={"WEEKLY":int(settings.get("weekly_append_max_total",5) or 5),
+            "MONTHLY":int(settings.get("monthly_append_max_total",8) or 8),
+            "ETF":int(settings.get("etf_append_max_total",3) or 3),
+            "INTERNATIONAL":int(settings.get("international_append_max_total",3) or 3),
+            "GLOBAL_INDIA_LONG":int(settings.get("global_india_append_max_total",5) or 5),
+            "GLOBAL_INDIA_SHORT":int(settings.get("global_india_append_max_total",5) or 5)}
+    max_total=max(0,limits.get(b,0));max_day=max(0,int(settings.get("horizon_append_max_per_day",1) or 1))
+    with db() as con:
+        rows=con.execute(
+            "SELECT created_at,rationale_json FROM recommendations WHERE book=? AND period_key=? AND COALESCE(result,'')<>'VOID'",
+            (b,pk),
+        ).fetchall()
+    total=day=0;today=now.date().isoformat()
+    for row in rows:
+        try:r=json.loads(row["rationale_json"] or "{}")
+        except Exception:r={}
+        if r.get("selection_phase")!="APPEND_DISCOVERY":continue
+        total+=1
+        if str(row["created_at"] or "")[:10]==today:day+=1
+    return {"remaining_total":max(0,max_total-total),"remaining_today":max(0,max_day-day),
+            "appended_total":total,"appended_today":day,"max_total":max_total,"max_per_day":max_day}
+
+
+def _publish_append_discoveries(book:str, period_key_override:Optional[str]=None,
+                                publication_anchor:Optional[datetime]=None) -> int:
+    """Append only genuinely stronger in-period discoveries; never replace frozen identities.
+
+    This is intentionally stricter than the initial freeze. It requires the original
+    target gate, ELIGIBLE trade intelligence, a confirmed/strong tandem-evidence
+    combination, and an ensemble-score uplift. New evidence may add a call; it may not
+    erase, re-rank or recycle an earlier call.
+    """
+    b=str(book).upper();pk=str(period_key_override or period_key(b));now=publication_anchor or datetime.now(IST)
+    cap=_append_discovery_capacity(b,pk,now)
+    allowance=min(cap["remaining_total"],cap["remaining_today"])
+    if allowance<=0:return 0
+    settings=load_settings();uplift=float(settings.get("horizon_append_score_uplift",5.0) or 5.0)
+    base={"WEEKLY":float(settings.get("weekly_min_score",80.0) or 80.0),
+          "MONTHLY":float(settings.get("monthly_min_score",84.0) or 84.0),
+          "ETF":68.0,"INTERNATIONAL":float(settings.get("international_weekly_min_score",78.0) or 78.0)}.get(b,80.0)
+    threshold=base+uplift
+    with db() as con:
+        existing={str(r[0]).upper() for r in con.execute(
+            "SELECT symbol FROM recommendations WHERE book=? AND period_key=? AND COALESCE(result,'')<>'VOID'",(b,pk)
+        ).fetchall()}
+        rs=con.execute(
+            "SELECT * FROM candidate_observations WHERE book=? AND period_key=? AND observations>=1 ORDER BY avg_score DESC",
+            (b,pk),
+        ).fetchall()
+    blocked=_weekly_monthly_conflicts(b,pk) if b in ("WEEKLY","MONTHLY") else set()
+    eligible=[]
+    for raw in rs:
+        sym=str(raw["symbol"] or "").upper()
+        if not sym or sym in existing or sym in blocked or str(raw["side"]).upper()!="LONG":continue
+        try:cand=json.loads(raw["payload_json"] or "{}")
+        except Exception:continue
+        tf=cand.get("target_feasibility") or {};ti=cand.get("trade_intelligence") or {}
+        combo=ti.get("evidence_combination") or {}
+        if b in ("WEEKLY","MONTHLY","ETF") and not tf.get("target_qualified"):continue
+        if str(ti.get("decision") or "")!="ELIGIBLE":continue
+        if str(combo.get("combination_state") or "") not in ("CONFIRMED","STRONG"):continue
+        score=float(raw["avg_score"] or 0)
+        if score<threshold:continue
+        eligible.append((score,float(cand.get("confidence") or 0),cand))
+    eligible.sort(key=lambda x:(x[0],x[1]),reverse=True)
+    made=0
+    for score,confidence,cand in eligible[:allowance]:
+        rationale=dict(cand.get("rationale") or {})
+        rationale.update({
+            "official_period_book":True,"selection_phase":"APPEND_DISCOVERY",
+            "initial_frozen_slate_preserved":True,"append_only":True,"no_rank_replacement":True,
+            "append_score_threshold":threshold,"append_discovered_at":now_iso(),
+            "append_evidence_combination":((cand.get("trade_intelligence") or {}).get("evidence_combination") or {}),
+            "publication_policy_version":"V689_APPEND_ONLY_OWN_EVERY_RECOMMENDATION",
+        })
+        if b in HORIZON_EXECUTABLE_SIDES:
+            rationale["horizon_execution_side_policy"]="LONG_ONLY"
+            rationale["bearish_horizon_signals_are_research_only"]=True
+        rid=_insert_rec(b,cand["symbol"],"LONG",score,confidence,cand["price"],cand["features"],
+                        cand["regime"],cand["strategies"],rationale,period_key_override=pk)
+        if rid:made+=1
+    return made
+
+
+def _run_horizon_append_cycle(book:str, now:datetime, pk:str, target_now:datetime) -> int:
+    cap=_append_discovery_capacity(book,pk,now)
+    if min(cap["remaining_total"],cap["remaining_today"])<=0:return 0
+    t=now.time().replace(tzinfo=None)
+    if not is_regular_trading_day(now.date()) or not (MARKET_OPEN<=t<=HORIZON_RECOVERY_END):return 0
+    settings=load_settings();batch=_recovery_symbol_batch(book,"1day",pk,int(settings.get("horizon_recovery_batch_size",120)))
+    set_state(f"scan_status_{book}",{"book":book,"running":True,"status":"APPEND_DISCOVERY_SCAN","period_key":pk,
+        "selection_phase":"APPEND_DISCOVERY","append_capacity":cap,"at":now_iso()})
+    cands=scan_equities(book,symbols_override=batch.get("symbols") or [],sides_override=("LONG",),
+        target_now=target_now,period_key_override=pk,scan_policy="APPEND_DISCOVERY_HIGH_CONVICTION_NO_REPLACEMENT")
+    _observe(book,cands,period_key_override=pk)
+    made=_publish_append_discoveries(book,period_key_override=pk,publication_anchor=datetime.now(IST))
+    cap_after=_append_discovery_capacity(book,pk,datetime.now(IST))
+    set_state(f"scan_status_{book}",{"book":book,"running":False,"status":"APPEND_DISCOVERY_ADDED" if made else "APPEND_DISCOVERY_NO_NEW_HIGH_CONVICTION",
+        "period_key":pk,"selection_phase":"APPEND_DISCOVERY","eligible_candidates":len(cands),"appended":made,
+        "append_capacity":cap_after,"initial_frozen_slate_preserved":True,"at":now_iso()})
+    return made
+
 def _journal_decisions(book: str, candidates: List[Dict[str,Any]], period_key_override: Optional[str]=None) -> None:
     """Batch decision-journal writes with point-in-time audit envelopes."""
     if not candidates:return
@@ -1009,7 +1116,7 @@ def update_live_books():
             if close is None and t>=SHORT_HARD_EXIT:
                 if book=='INTRADAY' and side=='SHORT':close='USER_1500_SHORT_CUTOFF';result='MISS'
                 elif book=='CIRCUIT' and r.get('period_key')==today:close='USER_1500_CIRCUIT_CUTOFF';result='MISS'
-                elif book in ('CIRCUIT_NEXTDAY','GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT') and str(r.get('period_key') or '')<=today:
+                elif book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<=today:
                     close='SESSION_1500_FORECAST_CUTOFF';result='MISS'
             # Session/rollover safety if the laptop was asleep at the normal close.
             if close is None and book=='INTRADAY':
@@ -1020,8 +1127,14 @@ def update_live_books():
             if close is None and book=='CIRCUIT' and str(r.get('period_key') or '')<today:
                 close='CIRCUIT_SESSION_ROLLOVER';result='MISS'
             # Rollover safety for forecast books if the laptop was asleep at the cutoff.
-            if close is None and book in ('CIRCUIT_NEXTDAY','GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT') and str(r.get('period_key') or '')<today:
+            if close is None and book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<today:
                 close='FORECAST_SESSION_ROLLOVER';result='MISS'
+            if close is None and book in ('GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT'):
+                current_week=period_key(book,now)
+                if str(r.get('period_key') or '')<current_week:
+                    close='GLOBAL_INDIA_WEEK_ROLLOVER';result='MISS'
+                elif now.date()>=_period_end_date('WEEKLY',now) and t>=MARKET_CLOSE:
+                    close='GLOBAL_INDIA_WEEK_END';result='MISS'
             if close:
                 con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,state='CLOSED',closed_at=?,result=?,close_reason=?,updated_at=? WHERE recommendation_id=?",(px,mfe,mae,now_iso(),result,close,now_iso(),r["recommendation_id"]))
             else:
@@ -1118,11 +1231,14 @@ def run_single_horizon_cycle(book: str):
     required=_freeze_contract_min(book) or 5
     existing=_freeze_contract_count(book,pk)
     if existing>=required:
-        state={"open":False,"status":"PERIOD_BOOK_ALREADY_FROZEN","period_key":pk,"required":required,"published_total":existing,"shortage":0,
-               "preperiod":preperiod}
-        set_state(f"scan_status_{book}",{"book":book,"running":False,"status":"PERIOD_BOOK_ALREADY_FROZEN","at":now_iso(),"freeze":state,"contract":state,"target_period":ctx})
-        _mark_scan_detail_idle(book,"PERIOD_BOOK_ALREADY_FROZEN",period_key=pk,freeze_contract=state,target_period=ctx)
-        return 0
+        # PERIOD_BOOK_ALREADY_FROZEN remains the identity invariant; v6.8.9 may run
+        # a separate stricter append-discovery scan without replacing that frozen slate.
+        appended=_run_horizon_append_cycle(book,now,pk,target_now) if not preperiod else 0
+        state={"open":False,"status":"PERIOD_BOOK_FROZEN_APPEND_ONLY","period_key":pk,"required":required,"published_total":existing+appended,"shortage":0,
+               "preperiod":preperiod,"initial_slate_immutable":True,"append_only":True,"append_capacity":_append_discovery_capacity(book,pk,now)}
+        set_state(f"scan_status_{book}",{"book":book,"running":False,"status":"PERIOD_BOOK_FROZEN_APPEND_ONLY","at":now_iso(),"freeze":state,"contract":state,"target_period":ctx,"appended_this_cycle":appended})
+        if not appended:_mark_scan_detail_idle(book,"PERIOD_BOOK_FROZEN_APPEND_ONLY",period_key=pk,freeze_contract=state,target_period=ctx)
+        return appended
 
     # On the final monthly session a missing current-month slate can no longer satisfy
     # the unchanged 50% monthly target without fabricating edge.  Do not burn hours on an
@@ -1491,6 +1607,9 @@ class Engine:
         t.start()
         return t
 
+    def _health_snapshot_refresh(self):
+        refresh_health_db_snapshot()
+
     def _maintenance(self):
         settings=load_settings()
         # Low-priority universe rotation. Scanners never wait for this worker.
@@ -1659,6 +1778,7 @@ class Engine:
             ("broker_probe",float(settings.get("broker_probe_interval_seconds",300)),self._broker_probe,1),
             ("execution_integrity",float(settings.get("execution_integrity_worker_interval_seconds",120)),self._execution_integrity,6),
             ("backup_integrity",float(settings.get("backup_worker_interval_seconds",3600)),self._backup_integrity,120),
+            ("health_snapshot",float(settings.get("health_snapshot_worker_interval_seconds",5)),self._health_snapshot_refresh,1),
             ("universe_refresh",float(settings.get("universe_refresh_interval_seconds",1800)),self._universe_refresh,2),
             ("market_snapshot",float(settings.get("full_breadth_ltp_interval_seconds",180)),self._market_snapshot,3),
             ("priority_quotes",float(settings.get("live_update_interval_seconds",60)),self._priority_quote_refresh,3),
