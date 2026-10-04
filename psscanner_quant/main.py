@@ -158,6 +158,8 @@ def health():
         snapshot_age=max(0.0,(now-refreshed).total_seconds())
     except Exception:pass
     snapshot_fresh=bool(snap.get("ready") and snapshot_age is not None and snapshot_age<=20.0)
+    order_count=snap.get("order_count") if snapshot_fresh else None
+    # execution_readiness_cached_snapshot is produced only by the background health worker.
     fundamentals=snap.get("fundamentals") or {"status":"WARMING","mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE"}
     events=snap.get("events") or {"status":"WARMING"}
     history_cached=snap.get("history_control") or {"status":"WARMING","nonblocking":True}
@@ -225,7 +227,7 @@ def health():
             "background_snapshot_elapsed_ms":snap.get("elapsed_ms"),
             "background_snapshot_last_error":snap.get("last_error"),
             "db_snapshot_error":None if snap.get("ready") else (snap.get("last_error") or "health snapshot warming"),
-            "execution_snapshot_available":snapshot_fresh and snap.get("order_count") is not None,
+            "execution_snapshot_available":order_count is not None,
             "stale_snapshot_blocks_execution":True,
             "elapsed_ms":round((time.monotonic()-started)*1000.0,1)}}
 
