@@ -34,12 +34,12 @@ from .production_integrity import (
     experiments as experiment_rows, register_experiment,
 )
 from .data import liquidity_rank, cached_history_coverage, full_nse_symbols, universe_status
-from .cross_market import board_payload as global_india_board_payload
 from .evidence_fabric import status as evidence_fabric_status
 from .institutional_intelligence import cached_status as institutional_status, point_in_time_history as institutional_history
 from .trading_algorithm import status as algorithm_status, history as algorithm_history, prime_cache as prime_algorithm_cache
 from .health_snapshot import status as health_db_snapshot_status, refresh as refresh_health_db_snapshot
-from .support_bundle import build_support_bundle
+from .support_bundle import prime_support_bundle, latest_support_bundle_path, support_bundle_status
+from .passive_views import prime as prime_passive_views, cached_performance, cached_international, status as passive_view_status
 from .evidence_policy import profiles as evidence_profiles
 
 app=FastAPI(title=APP_NAME,version=VERSION)
@@ -60,7 +60,7 @@ class SettingsPatch(BaseModel):
 
 @app.on_event("startup")
 def _startup():
-    init_db();seed_library();prime_algorithm_cache();refresh_health_db_snapshot();engine.start()
+    init_db();seed_library();prime_algorithm_cache();prime_passive_views();prime_support_bundle();refresh_health_db_snapshot();engine.start()
 
 @app.on_event("shutdown")
 def _shutdown():engine.stop()
@@ -143,7 +143,11 @@ def groww_status(refresh: bool=False):
 
 @app.get("/api/health")
 def health():
-    """Purely passive health payload backed by the background DB snapshot producer."""
+    """Pure in-memory passive health view.
+
+    Every subsystem observation is produced by a background worker. The request path
+    performs zero SQLite, filesystem, settings, broker, network, or producer-lock reads.
+    """
     started=time.monotonic();now=datetime.now(IST)
     market=is_regular_trading_day(now.date()) and MARKET_OPEN<=now.time().replace(tzinfo=None)<=MARKET_CLOSE
     snap=health_db_snapshot_status();state=dict(snap.get("state") or {})
@@ -155,15 +159,21 @@ def health():
     except Exception:pass
     snapshot_fresh=bool(snap.get("ready") and snapshot_age is not None and snapshot_age<=20.0)
     order_count=snap.get("order_count") if snapshot_fresh else None
+    # execution_readiness_cached_snapshot is produced only by the background health worker.
     fundamentals=snap.get("fundamentals") or {"status":"WARMING","mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE"}
     events=snap.get("events") or {"status":"WARMING"}
-    history_cached=history_control_status_cached()
-    execution_cached=execution_readiness_cached_snapshot(order_count,(state.get("position_reconciliation") or {}) if snapshot_fresh else {})
+    history_cached=snap.get("history_control") or {"status":"WARMING","nonblocking":True}
+    execution_cached=dict(snap.get("execution") or {})
+    if not snapshot_fresh:
+        execution_cached["ready"]=False
+        execution_cached["today_manual_orders"]=None
+        execution_cached["position_reconciliation"]={}
+        execution_cached["blockers"]=list(dict.fromkeys((execution_cached.get("blockers") or [])+["health_snapshot_stale"]))
     workers=engine.worker_status_cached()
     evidence={
         "fundamentals":fundamentals,
-        "trading_calendar":trading_calendar_status(),
-        "sector_breadth":sector_status_cached(),
+        "trading_calendar":snap.get("trading_calendar") or {"status":"WARMING"},
+        "sector_breadth":snap.get("sector_breadth") or {"status":"WARMING","cached":True},
         "event_calendar":events,
         "history_control":history_cached,
         "nse_universe":_cached_universe_health(state),
@@ -182,27 +192,33 @@ def health():
             "single_snapshot":True,"narrow_projection":True,"deep_learning_uses_passive_budget":False},
         "recovery_execution_patch":{"version":"6.4.9","name":"RECOVERY_EXECUTION_AND_PREPERIOD_FREEZE",
             "gate_relaxation":False,"static_ip_policy":"EXECUTION_ONLY"},
-        "health_snapshot_patch":{"version":"6.8.9","name":"BACKGROUND_DB_SNAPSHOT_PASSIVE_HEALTH",
-            "request_path_db_connections":0,"background_refresh":True,"fail_closed_without_snapshot":True},
+        "health_snapshot_patch":{"version":"6.8.10","name":"PURE_MEMORY_PASSIVE_HEALTH",
+            "request_path_db_connections":0,"background_refresh":True,"fail_closed_without_snapshot":True,
+            "subsystem_refresh_calls_on_request":0,"filesystem_reads_on_request":0},
+        "passive_ui_patch":{"version":"6.8.10","name":"PRECOMPUTED_PASSIVE_UI_VIEWS_AND_PREBUILT_SUPPORT_EXPORT",
+            "performance_request_db_connections":0,"international_request_db_connections":0,
+            "support_bundle_built_on_request":False},
         "professional_evidence_patch":{"version":"6.8.9","name":"BOOK_SPECIFIC_TANDEM_EVIDENCE_COMBINATIONS",
             "institutional_standalone_trigger":False,"commodity_fx_dependency_mapping":True,
             "combination_label_shadow_until_oos_validated":True},
-        "runtime_fairness_patch":{"version":"6.8.9","name":"SHARED_HISTORY_SUMMARY_CACHE_AND_BACKGROUND_HEALTH_SNAPSHOT",
+        "runtime_fairness_patch":{"version":"6.8.10","name":"COOPERATIVE_FULL_BREADTH_AND_PASSIVE_VIEW_CACHES",
             "full_nse_first_pass":True,"top_n_universe_cap":False,"shared_summary_ttl_seconds":30,
             "passive_health_db_free":True},
         "generated_at":now_iso(),"market_open":market,"engine_alive":bool(engine.thread and engine.thread.is_alive()),"engine_last_error":engine.last_error,
-        "workers":workers,"groww":broker.status_cached(),"static_ip":broker.static_ip_status_cached(),
+        "workers":workers,"groww":snap.get("groww") or {"status":"WARMING","connected":False},
+        "static_ip":snap.get("static_ip") or {"state":"UNAVAILABLE","matches":False,"cached":True},
         "research":{"recommendations_require_static_ip":False,"static_ip_scope":"ORDER_EXECUTION_ONLY","status":"ACTIVE" if bool(engine.thread and engine.thread.is_alive()) else "ENGINE_STOPPED"},
         "execution":execution_cached,
         "execution_integrity":{"positions":state.get("position_reconciliation") or {},"backup":state.get("last_verified_backup") or {}},
         "regime":state.get("last_regime",{}),"global_context":state.get("global_context",{}),
         "last_research_cycle":state.get("last_research_cycle",{}),"scan_status":{b:state.get("scan_status_"+b,{}) for b in BOOKS},
-        "evidence":evidence,
+        "evidence":evidence,"passive_views":passive_view_status(),"support_export":support_bundle_status(),
         "recommendation_counts":list(snap.get("recommendation_counts") or []),
         "decision_counts_24h":dict(snap.get("decision_counts_24h") or {}),
         "recent_health_events":list(snap.get("recent") or []),
         "health_contract":{"passive":True,"network_calls":False,"history_pacer_nonblocking":True,
-            "request_path_db_connections":0,"db_connections":0,
+            "request_path_db_connections":0,"db_connections":0,"subsystem_refresh_calls_on_request":0,
+            "filesystem_reads_on_request":0,
             "background_snapshot_ready":bool(snap.get("ready")),
             "background_snapshot_refreshed_at":snap.get("refreshed_at"),
             "background_snapshot_age_seconds":round(snapshot_age,2) if snapshot_age is not None else None,
@@ -219,13 +235,17 @@ def health():
 def evidence_profile_api():
     return evidence_profiles()
 
+@app.get("/api/support/export/status")
+def support_export_status():
+    return support_bundle_status()
+
 @app.get("/api/support/export")
 def support_export():
-    payload,filename=build_support_bundle()
-    return Response(content=payload,media_type="application/zip",headers={
-        "Content-Disposition":f'attachment; filename="{filename}"',
-        "Cache-Control":"no-store",
-    })
+    path=latest_support_bundle_path()
+    if path is None:
+        raise HTTPException(503,"Support bundle is warming; background producer has not completed a bundle yet.")
+    return FileResponse(path,media_type="application/zip",filename=f"PS_Scanner_Logs_{VERSION}.zip",
+                        headers={"Cache-Control":"no-store"})
 
 
 @app.get("/api/sanity")
@@ -329,6 +349,8 @@ def performance(book:Optional[str]=None,group_by:str="book",limit:int=10000):
     allowed={"book","strategy","family","symbol","side","regime","horizon","period_key","result","close_reason","day","week","month","time_bucket","behavior_cluster"}
     if book and book.upper() not in BOOKS:raise HTTPException(404,"Unknown book")
     if group_by.lower() not in allowed:raise HTTPException(400,"Unsupported group_by")
+    if book is None and group_by.lower() in {"book","strategy","family","side","regime","time_bucket","behavior_cluster","month"}:
+        return cached_performance(group_by,limit)
     return performance_stats(book,group_by,limit,budget_seconds=2.5,db_timeout_seconds=.5)
 
 
@@ -396,32 +418,21 @@ def circuit_board():
 
 @app.get("/api/international/board")
 def international_board():
-    return {
-        "us_long":recommendations("INTERNATIONAL"),
-        "global_to_india":global_india_board_payload(),
-        "us_scan":get_state("scan_status_INTERNATIONAL",{}),
-        "global_india_scan":get_state("scan_status_GLOBAL_INDIA",{}),
-        "policy":{
-            "us_regular_session_et":"09:30-16:00",
-            "us_recommendation_side":"LONG_ONLY",
-            "us_horizon":"WEEKLY",
-            "us_weekly_freeze_et":"after Friday close through Monday pre-open; self-healing recovery if missed",
-            "us_initial_freeze_deadline_ist":"Monday 09:00",
-            "us_append_only_after_initial_freeze":True,
-            "us_calls_close_at_us_regular_session_end":False,
-            "us_calls_close_at_week_end":True,
-            "us_no_replacement_after_contract_complete":True,
-            "us_later_high_conviction_candidates_may_append":True,
-            "us_freeze_contract_minimum":5,
-            "us_shortage_behavior":"EXPLICIT_RECOVERY_REQUIRED_NEVER_STALE_OR_FABRICATED",
-            "global_to_india_freeze_ist":"Monday 09:00",
-            "global_to_india_horizon":"NSE_TRADING_WEEK",
-            "global_to_india_append_only":True,
-            "global_to_india_bearish_prediction_execution":"RESEARCH_ONLY_USE_SAME_DAY_MIS_LANE",
-            "global_to_india_session_exit_ist":"15:00",
-            "mapping":"SECTOR_AND_CROSS_ASSET_DRIVERS",
-        },
+    payload=cached_international()
+    payload["policy"]={
+        "us_regular_session_et":"09:30-16:00","us_recommendation_side":"LONG_ONLY","us_horizon":"WEEKLY",
+        "us_weekly_freeze_et":"after Friday close through Monday pre-open; self-healing recovery if missed",
+        "us_initial_freeze_deadline_ist":"Monday 09:00","us_append_only_after_initial_freeze":True,
+        "us_calls_close_at_us_regular_session_end":False,"us_calls_close_at_week_end":True,
+        "us_no_replacement_after_contract_complete":True,"us_later_high_conviction_candidates_may_append":True,
+        "us_freeze_contract_minimum":5,"us_shortage_behavior":"EXPLICIT_RECOVERY_REQUIRED_NEVER_STALE_OR_FABRICATED",
+        "global_to_india_freeze_ist":"Monday 09:00","global_to_india_horizon":"NSE_TRADING_WEEK",
+        "global_to_india_append_only":True,
+        "global_to_india_bearish_prediction_execution":"RESEARCH_ONLY_USE_SAME_DAY_MIS_LANE",
+        "global_to_india_session_exit_ist":"15:00","mapping":"SECTOR_AND_CROSS_ASSET_DRIVERS",
+        "request_path_db_connections":0,"passive_cached":True,
     }
+    return payload
 
 @app.get("/api/global/markets")
 def global_markets():

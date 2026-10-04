@@ -115,6 +115,9 @@ _DEFAULTS: Dict[str, Any] = {
     "execution_integrity_worker_interval_seconds": 120,
     "backup_worker_interval_seconds": 3600,
     "health_snapshot_worker_interval_seconds": 5,
+    "international_view_worker_interval_seconds": 15,
+    "performance_view_worker_interval_seconds": 60,
+    "support_bundle_worker_interval_seconds": 300,
     # v6.8.9 append-only horizon discoveries: initial slates remain immutable while
     # genuinely stronger later evidence may add identities without replacing old calls.
     "weekly_append_max_total": 5,
