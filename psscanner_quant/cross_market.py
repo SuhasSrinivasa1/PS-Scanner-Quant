@@ -100,6 +100,12 @@ def _global_india_summary_features(summary:Dict[str,Any])->Dict[str,float]|None:
     return {"close":px,"ret20":ret20,"trend":trend}
 
 
+def _global_india_score_ceiling(aligned:float, trend:float, side:str, calibration:float)->float:
+    sign=1 if str(side).upper()=="LONG" else -1
+    trend_ok=sign*float(trend)>=0
+    return 68+min(16,float(aligned)*9)+(7 if trend_ok else -4)+7+float(calibration)
+
+
 def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
                                  moves:Dict[str,Any], calibration:Dict[str,float])->Dict[str,Any]|None:
     f=_global_india_summary_features(summary)
@@ -113,10 +119,9 @@ def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
         sign=1 if side=="LONG" else -1
         aligned=sign*combined
         if aligned<=0.12:continue
-        trend_ok=sign*float(f["trend"])>=0
         # Exact live formula contributes at most +7 from ADX. If the score cannot
         # reach 78 even with that maximum, detailed candle parsing cannot rescue it.
-        ceiling=68+min(16,aligned*9)+(7 if trend_ok else -4)+7+float(calibration.get(side) or 0)
+        ceiling=_global_india_score_ceiling(aligned,float(f["trend"]),side,float(calibration.get(side) or 0))
         if ceiling>=78:possible.append(side)
     if not possible:return None
     return {"sides":tuple(possible),"cue":cue,"evidence":evidence,"combined":combined}
