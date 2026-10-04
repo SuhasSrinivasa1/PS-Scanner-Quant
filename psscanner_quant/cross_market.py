@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from .constants import IST, GLOBAL_INDIA_FREEZE_TIME, SHORT_HARD_EXIT
 from .config import load_settings
-from .data import universe, history, liquidity_rank, full_nse_symbols
+from .data import universe, history, liquidity_rank, full_nse_symbols, history_summary_snapshot
 from .db import db, get_state, now_iso, set_state, health
 from .features import latest_features
 from .fundamentals import get as fundamentals_get
@@ -78,31 +79,98 @@ def _calibration_adjustment(side:str)->float:
     except Exception:return 0.0
 
 
+def _global_india_summary_features(summary:Dict[str,Any])->Dict[str,float]|None:
+    """Return exact close-only fields used by the Global->India necessary prefilter.
+
+    The detailed scanner still computes the authoritative pandas feature set for every
+    survivor. These values only prove when a symbol cannot possibly clear the unchanged
+    score gate, even after granting the maximum ADX contribution.
+    """
+    rows=int((summary or {}).get("daily_rows") or 0)
+    closes=[float(x) for x in ((summary or {}).get("recent_closes") or []) if x is not None]
+    if rows<60 or len(closes)<50:return None
+    px=float(closes[-1] or 0)
+    if px<=0 or len(closes)<21:return None
+    base=float(closes[-21] or 0)
+    if base<=0:return None
+    ret20=(px/base-1.0)*100.0
+    sma20=sum(closes[-20:])/20.0
+    sma50=sum(closes[-50:])/50.0
+    trend=1.0 if px>sma20>sma50 else (-1.0 if px<sma20<sma50 else 0.0)
+    return {"close":px,"ret20":ret20,"trend":trend}
+
+
+def _global_india_score_ceiling(aligned:float, trend:float, side:str, calibration:float)->float:
+    sign=1 if str(side).upper()=="LONG" else -1
+    trend_ok=sign*float(trend)>=0
+    return 68+min(16,float(aligned)*9)+(7 if trend_ok else -4)+7+float(calibration)
+
+
+def _global_india_possible_sides(row:Dict[str,Any], summary:Dict[str,Any],
+                                 moves:Dict[str,Any], calibration:Dict[str,float])->Dict[str,Any]|None:
+    f=_global_india_summary_features(summary)
+    if not f:return None
+    labels=_drivers(str(row.get("industry") or "UNKNOWN"));cue,evidence=_driver_score(labels,moves)
+    if not evidence:return None
+    own=float(f["ret20"])/20.0
+    combined=.68*cue+.32*own
+    possible=[]
+    for side in ("LONG","SHORT"):
+        sign=1 if side=="LONG" else -1
+        aligned=sign*combined
+        if aligned<=0.12:continue
+        # Exact live formula contributes at most +7 from ADX. If the score cannot
+        # reach 78 even with that maximum, detailed candle parsing cannot rescue it.
+        ceiling=_global_india_score_ceiling(aligned,float(f["trend"]),side,float(calibration.get(side) or 0))
+        if ceiling>=78:possible.append(side)
+    if not possible:return None
+    return {"sides":tuple(possible),"cue":cue,"evidence":evidence,"combined":combined}
+
+
 def build_global_india_board() -> Dict[str,Any]:
-    now=datetime.now(IST);target=_target_trade_date(now);g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
+    started=time.monotonic();now=datetime.now(IST);target=_target_trade_date(now);g=get_state('global_context',{}) or {};moves=g.get('moves_pct') or {}
     settings=load_settings();max_side=max(1,min(10,int(settings.get('global_india_max_per_side',5))))
     syms=full_nse_symbols()
     meta={str(x.get('symbol') or '').upper():x for x in universe()}
-    # Calibration depends only on the LONG/SHORT book's resolved outcomes, not on symbol.
-    # Read each side once per full-NSE cycle instead of opening SQLite twice per stock.
     calibration={side:_calibration_adjustment(side) for side in ('LONG','SHORT')}
-    candidates=[]
-    for sym in [str(x or '').upper() for x in syms if x]:
+
+    # v6.8.8: full breadth remains unconditional, but the first pass uses the compact
+    # persisted 60-close summary created in v6.8.6. No arbitrary Top-N cap is introduced.
+    # A symbol reaches detailed pandas/candle work iff it can mathematically still clear
+    # the existing score gate after granting the maximum possible ADX contribution.
+    summaries=history_summary_snapshot(syms)
+    detail_plan={}
+    summary_ready=0
+    for idx,sym in enumerate([str(x or '').upper() for x in syms if x],1):
+        if idx%64==0:time.sleep(0)
+        summary=summaries.get(sym) or {}
+        if int(summary.get("daily_rows") or 0)>=60:summary_ready+=1
+        row=meta.get(sym,{})
+        possible=_global_india_possible_sides(row,summary,moves,calibration)
+        if possible:detail_plan[sym]=possible
+
+    set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':True,'status':'DETAIL_ENRICHMENT',
+        'stage':'DETAIL_ENRICHMENT','summary_evaluated':len(syms),'summary_ready':summary_ready,
+        'detail_candidates':len(detail_plan),'target_session':target.isoformat(),'at':now_iso(),
+        'policy':'FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP'})
+
+    candidates=[];detail_parsed=0
+    for idx,(sym,plan) in enumerate(detail_plan.items(),1):
+        if idx%8==0:time.sleep(0)
         try:df=history(sym,'1day',allow_network=False)
         except Exception:continue
         if len(df)<60:continue
+        detail_parsed+=1
         f=latest_features(df);px=float(f.get('close') or 0)
         if px<=0:continue
         row=meta.get(sym,{})
         labels=_drivers(str(row.get('industry') or 'UNKNOWN'));cue,evidence=_driver_score(labels,moves)
         if not evidence:continue
-        # Combine overnight cross-market cue with the stock's own daily trend so the mapping
-        # does not become a naive one-to-one "US stock up => Indian stock up" rule.
         own=float(f.get('ret20') or 0)/20.0
         trend=float(f.get('trend') or 0)
         adx=float(f.get('adx14') or 0);atr=max(.15,float(f.get('atr_pct') or 1.0))
         combined=.68*cue+.32*own
-        for side in ('LONG','SHORT'):
+        for side in plan.get("sides") or ():
             sign=1 if side=='LONG' else -1
             aligned=sign*combined
             if aligned<=0.12:continue
@@ -126,7 +194,11 @@ def build_global_india_board() -> Dict[str,Any]:
             score=.80*score+.20*float(ti.get('score') or 0)
             candidates.append({'symbol':sym,'side':side,'score':round(score,2),'confidence':round(max(.52,min(.84,.55+abs(combined)*.08+min(20,len(evidence))*0.005)),3),'price':px,'features':f,'fundamentals':fund,'industry':row.get('industry') or 'UNKNOWN','driver_cue_pct':round(cue,3),'combined_cue_pct':round(combined,3),'drivers':evidence,'target_pct':round(target_pct,4),'stop_pct':round(stop_pct,4),'target_date':target.isoformat(),'trade_intelligence':ti,'institutional_context':shared['institutional'],'evidence_fabric_policy':shared['fabric_policy']})
     candidates.sort(key=lambda x:x['score'],reverse=True)
-    board={'generated_at':now_iso(),'target_session':target.isoformat(),'freeze_time_ist':'09:00','state':'FROZEN' if is_regular_trading_day(now.date()) and now.date()==target and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME else 'PROVISIONAL_OVERNIGHT','long':[x for x in candidates if x['side']=='LONG'][:max_side],'short':[x for x in candidates if x['side']=='SHORT'][:max_side],'global_context_generated_at':g.get('generated_at'),'global_coverage':g.get('coverage',len(moves)),'policy':'GLOBAL_MARKETS_TO_INDIA_OVERNIGHT_SHARED_EVIDENCE_V680','universe_scanned':len(syms)}
+    runtime={'summary_evaluated':len(syms),'summary_ready':summary_ready,'detail_candidates':len(detail_plan),
+             'detail_parsed':detail_parsed,'detail_parse_ratio':round(detail_parsed/max(1,len(syms)),4),
+             'cooperative_yield':True,'elapsed_seconds':round(time.monotonic()-started,2),
+             'policy':'FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP'}
+    board={'generated_at':now_iso(),'target_session':target.isoformat(),'freeze_time_ist':'09:00','state':'FROZEN' if is_regular_trading_day(now.date()) and now.date()==target and now.time().replace(tzinfo=None)>=GLOBAL_INDIA_FREEZE_TIME else 'PROVISIONAL_OVERNIGHT','long':[x for x in candidates if x['side']=='LONG'][:max_side],'short':[x for x in candidates if x['side']=='SHORT'][:max_side],'global_context_generated_at':g.get('generated_at'),'global_coverage':g.get('coverage',len(moves)),'policy':'GLOBAL_MARKETS_TO_INDIA_OVERNIGHT_SHARED_EVIDENCE_V688','universe_scanned':len(syms),'runtime':runtime}
     set_state('global_india_board',board)
     return board
 
@@ -155,7 +227,7 @@ def freeze_global_india_board() -> int:
 def run_global_india_cycle() -> int:
     try:
         board=build_global_india_board();made=freeze_global_india_board()
-        set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','status':'OK','generated_at':board.get('generated_at'),'target_session':board.get('target_session'),'state':board.get('state'),'long':len(board.get('long') or []),'short':len(board.get('short') or []),'published':made,'at':now_iso()})
+        set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','running':False,'status':'OK','generated_at':board.get('generated_at'),'target_session':board.get('target_session'),'state':board.get('state'),'long':len(board.get('long') or []),'short':len(board.get('short') or []),'published':made,'runtime':board.get('runtime') or {},'at':now_iso()})
         return made
     except Exception as exc:
         health('global_india','WARN',str(exc)[:220]);set_state('scan_status_GLOBAL_INDIA',{'book':'GLOBAL_INDIA','status':'ERROR','error':str(exc)[:220],'at':now_iso()});return 0

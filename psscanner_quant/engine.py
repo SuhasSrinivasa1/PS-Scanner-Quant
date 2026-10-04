@@ -1619,6 +1619,7 @@ class Engine:
 
     def _global_india(self):
         from .cross_market import run_global_india_cycle
+        self._set_worker_stage("global_india","FULL_BREADTH_SUMMARY_PREFILTER")
         run_global_india_cycle()
 
     def _international(self):

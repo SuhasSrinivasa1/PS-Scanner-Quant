@@ -1,8 +1,16 @@
 # PS Scanner handoff
 
-Current source version: **6.8.7**.
+Current source version: **6.8.8**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.8 Global-to-India runtime fairness
+
+The real Mac v6.8.7 install succeeded and proved the passive adaptive-algorithm cache: /api/algorithm returned in about 0.67 seconds with cache_ready=true and no deep institutional payload. Performance still degraded at the unchanged 2.5-second budget after 30 rows and health's optional DB snapshot was interrupted while market_snapshot was IDLE.
+
+v6.8.8 fixes the remaining independent hot path: the five-minute Global->India worker previously reparsed detailed daily history and rebuilt pandas features for the entire NSE equity universe, including weekends. It now screens every NSE equity from the compact history-summary index using a necessary-condition upper bound, then performs detailed history work only for symbols that can still satisfy the unchanged score gate. There is no Top-N universe cap or gate relaxation. Cooperative yields and summary-vs-detail runtime telemetry are added.
+
+See `RELEASE_v6.8.8.md` and `ARCHITECTURE_AUDIT_v6.8.8.md`.
 
 ## v6.8.7 passive adaptive-algorithm cache
 
