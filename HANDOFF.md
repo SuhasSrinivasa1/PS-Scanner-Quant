@@ -1,8 +1,18 @@
 # PS Scanner handoff
 
-Current source version: **6.8.9**.
+Current source version: **6.8.10**.
 
 The canonical source is the root of the dedicated `PS-Scanner-Quant` repository. Runtime state is intentionally not committed. On a Mac installation, runtime state remains under `~/Applications/PS_Scanner_Final/data`, logs under `~/Applications/PS_Scanner_Final/logs`, and local credentials under the secure runtime data path.
+
+## v6.8.10 passive UI completion
+
+The real-Mac v6.8.9 upgrade succeeded and validator returned ok=true. Under simultaneous live workers, however, health remained semantically correct but could still be scheduled for multiple seconds, Performance degraded after 31 loaded rows inside its 2.5-second passive budget, and International plus Export All Logs timed out.
+
+v6.8.10 moves the remaining heavy website reads to background-produced complete snapshots. Health now reads no settings/filesystem/broker/history helper on the request path. Common Performance groupings come from one background CLOSED-ledger snapshot. International/Global-to-India is a completed cached page payload. Export All Logs serves a prebuilt sanitized ZIP. Global-to-India remains full breadth and now yields cooperatively more often.
+
+No trading or evidence gate is loosened.
+
+See `RELEASE_v6.8.10.md` and `ARCHITECTURE_AUDIT_v6.8.10.md`.
 
 ## v6.8.9 final product integration pass
 
