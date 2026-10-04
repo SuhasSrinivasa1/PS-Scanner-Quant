@@ -48,7 +48,13 @@ def classify(prices: Dict[str,float] | None=None, allow_network_prices: bool=Tru
             if a>0:rets.append((b/a-1)*100)
         if len(rets)>=5:vol.append(float(pstdev(rets)))
     if not moves:
-        return {"regime":"WARMING","sample":0,"universe":len(syms),"history_ready":history_ready,"generated_at":now_iso(),"stale":True,"breadth_policy":"FULL_NSE_DATA_READY_EQUITIES"}
+        prior=get_state("last_regime",{}) or {}
+        if prior:
+            state=dict(prior);state["stale"]=True;state["generated_at"]=now_iso()
+            state["history_source"]="PRIOR_COMPLETE_REGIME_FALLBACK_SUMMARY_UNAVAILABLE"
+            return state
+        return {"regime":"WARMING","sample":0,"universe":len(syms),"history_ready":history_ready,"generated_at":now_iso(),"stale":True,
+                "breadth_policy":"FULL_NSE_DATA_READY_EQUITIES","history_source":"SQLITE_HISTORY_SUMMARY_INDEX"}
     up=sum(1 for x in moves if x>0.15)/len(moves)*100;down=sum(1 for x in moves if x<-0.15)/len(moves)*100
     med=median(moves);tv=sum(trend_votes)/max(1,len(trend_votes));rv=median(vol) if vol else 0.0;high_vol=rv>=2.2
     if down>=60 and tv<-0.25:regime="HIGH_VOL_TREND_DOWN" if high_vol else "TREND_DOWN"
