@@ -12,7 +12,6 @@ from .db import db, now_iso
 from .paths import LOGS, CREDENTIALS_PATH
 
 _SECRET_KEYS=("access_token","api_key","api_secret","totp_token","totp_secret","password","secret","authorization")
-_MAX_FILE_BYTES=25*1024*1024
 
 def _secret_values() -> list[str]:
     vals=[]
@@ -62,7 +61,6 @@ def build_support_bundle()->tuple[bytes,str]:
                 if not p.is_file():continue
                 try:
                     raw=p.read_bytes()
-                    if len(raw)>_MAX_FILE_BYTES:raw=raw[-_MAX_FILE_BYTES:]
                     text=raw.decode("utf-8","replace")
                     z.writestr("logs/"+str(p.relative_to(LOGS)),_redact_text(text,secrets))
                 except Exception as exc:
