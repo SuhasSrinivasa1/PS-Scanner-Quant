@@ -79,8 +79,8 @@ def period_key(book: str, now: Optional[datetime] = None) -> str:
         t=now.time().replace(tzinfo=None)
         return (now.date() if is_regular_trading_day(now.date()) and t < SHORT_HARD_EXIT else next_trading_day(now.date())).isoformat()
     if book in ("GLOBAL_INDIA_LONG", "GLOBAL_INDIA_SHORT"):
-        t=now.time().replace(tzinfo=None)
-        return (now.date() if is_regular_trading_day(now.date()) and t < SHORT_HARD_EXIT else next_trading_day(now.date())).isoformat()
+        monday=now.date()-timedelta(days=now.weekday())
+        return monday.isoformat()
     return now.date().isoformat()
 
 
@@ -681,7 +681,9 @@ def _append_discovery_capacity(book:str, pk:str, now:Optional[datetime]=None) ->
     limits={"WEEKLY":int(settings.get("weekly_append_max_total",5) or 5),
             "MONTHLY":int(settings.get("monthly_append_max_total",8) or 8),
             "ETF":int(settings.get("etf_append_max_total",3) or 3),
-            "INTERNATIONAL":int(settings.get("international_append_max_total",3) or 3)}
+            "INTERNATIONAL":int(settings.get("international_append_max_total",3) or 3),
+            "GLOBAL_INDIA_LONG":int(settings.get("global_india_append_max_total",5) or 5),
+            "GLOBAL_INDIA_SHORT":int(settings.get("global_india_append_max_total",5) or 5)}
     max_total=max(0,limits.get(b,0));max_day=max(0,int(settings.get("horizon_append_max_per_day",1) or 1))
     with db() as con:
         rows=con.execute(
@@ -1114,7 +1116,7 @@ def update_live_books():
             if close is None and t>=SHORT_HARD_EXIT:
                 if book=='INTRADAY' and side=='SHORT':close='USER_1500_SHORT_CUTOFF';result='MISS'
                 elif book=='CIRCUIT' and r.get('period_key')==today:close='USER_1500_CIRCUIT_CUTOFF';result='MISS'
-                elif book in ('CIRCUIT_NEXTDAY','GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT') and str(r.get('period_key') or '')<=today:
+                elif book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<=today:
                     close='SESSION_1500_FORECAST_CUTOFF';result='MISS'
             # Session/rollover safety if the laptop was asleep at the normal close.
             if close is None and book=='INTRADAY':
@@ -1125,8 +1127,14 @@ def update_live_books():
             if close is None and book=='CIRCUIT' and str(r.get('period_key') or '')<today:
                 close='CIRCUIT_SESSION_ROLLOVER';result='MISS'
             # Rollover safety for forecast books if the laptop was asleep at the cutoff.
-            if close is None and book in ('CIRCUIT_NEXTDAY','GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT') and str(r.get('period_key') or '')<today:
+            if close is None and book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<today:
                 close='FORECAST_SESSION_ROLLOVER';result='MISS'
+            if close is None and book in ('GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT'):
+                current_week=period_key(book,now)
+                if str(r.get('period_key') or '')<current_week:
+                    close='GLOBAL_INDIA_WEEK_ROLLOVER';result='MISS'
+                elif now.date()>=_period_end_date('WEEKLY',now) and t>=MARKET_CLOSE:
+                    close='GLOBAL_INDIA_WEEK_END';result='MISS'
             if close:
                 con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,state='CLOSED',closed_at=?,result=?,close_reason=?,updated_at=? WHERE recommendation_id=?",(px,mfe,mae,now_iso(),result,close,now_iso(),r["recommendation_id"]))
             else:
