@@ -86,7 +86,7 @@ def _write_logs(z:zipfile.ZipFile,secrets:Iterable[str])->int:
     return count
 
 
-def _write_db_exports(z:zipfile.ZipFile)->Dict[str,int]:
+def _write_db_exports(z:zipfile.ZipFile,secrets:Iterable[str])->Dict[str,int]:
     counts={}
     with db(timeout_seconds=10.0) as con:
         for name,sql in _EXPORTS.items():
@@ -95,7 +95,8 @@ def _write_db_exports(z:zipfile.ZipFile)->Dict[str,int]:
                 with z.open("diagnostics/"+name,"w") as dst:
                     for row in con.execute(sql):
                         payload=_sanitize(dict(row))
-                        dst.write((json.dumps(payload,separators=(",",":"),default=str)+"\n").encode("utf-8"))
+                        line=json.dumps(payload,separators=(",",":"),default=str)+"\n"
+                        dst.write(_redact_text(line,secrets).encode("utf-8"))
                         n+=1
                         if n%256==0:
                             time.sleep(0)
@@ -121,7 +122,7 @@ def _build_to_path(path:Path)->Dict[str,Any]:
     with zipfile.ZipFile(tmp,"w",compression=zipfile.ZIP_STORED,allowZip64=True) as z:
         z.writestr("manifest.json",json.dumps(manifest,indent=2,default=str))
         log_count=_write_logs(z,secrets)
-        table_counts=_write_db_exports(z)
+        table_counts=_write_db_exports(z,secrets)
     os.replace(tmp,path)
     return {
         "ready":True,"path":str(path),"generated_at":generated,"last_error":None,
