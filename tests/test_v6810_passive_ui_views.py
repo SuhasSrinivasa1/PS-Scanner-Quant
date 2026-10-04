@@ -53,8 +53,8 @@ class V6810PassiveUIViewTests(unittest.TestCase):
 
     def test_support_export_is_prebuilt_not_generated_on_click(self):
         src=inspect.getsource(main.support_export)
-        self.assertIn("latest_support_bundle_path()",src)
-        self.assertIn("FileResponse",src)
+        self.assertIn("latest_support_bundle_payload()",src)
+        self.assertIn("Response",src)
         self.assertNotIn("build_support_bundle",src)
         producer=inspect.getsource(support_bundle.refresh_support_bundle)
         self.assertIn("_build_to_path",producer)
@@ -74,7 +74,8 @@ class V6810PassiveUIViewTests(unittest.TestCase):
         self.assertIn("full_nse_symbols()",src)
         self.assertNotIn("syms[:",src)
         self.assertIn("time.sleep(0)",src)
-        self.assertIn("FULL_NSE_SUMMARY_NECESSARY_PREFILTER_NO_TOP_N_CAP",src)
+        self.assertIn("FULL_NSE_RESUMABLE_BRANCH_AND_BOUND_NO_TOP_N_CAP",src)
+        self.assertIn("partial_rows_published",src)
 
     def test_installer_primes_caches_before_launch(self):
         root=Path(__file__).resolve().parents[1]
