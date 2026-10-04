@@ -33,7 +33,7 @@ def get(path, *, timeout=6.0, attempts=4):
 
 
 ping=get("/api/ping",timeout=2,attempts=3)
-if ping.get("version")!="6.8.7":fail("runtime version is not 6.8.7")
+if ping.get("version")!="6.8.8":fail("runtime version is not 6.8.8")
 
 health_started=time.monotonic()
 health=get("/api/health",timeout=3,attempts=4)
