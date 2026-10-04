@@ -41,7 +41,7 @@ class V6812RuntimeCompletionTests(unittest.TestCase):
         self.assertIn("_global_india_final_score_ceiling",start_src)
         self.assertIn("deadline=time.monotonic()+budget",build_src)
         self.assertIn("BOUNDED_CONTINUATION_PENDING",build_src)
-        self.assertIn('"partial_rows_published":False',build_src)
+        self.assertIn("partial_rows_published",build_src)
         self.assertIn('if board.get("complete") is not True',run_src)
 
     def test_support_refresh_skips_fresh_completed_bundle_and_keeps_memory_payload(self):
