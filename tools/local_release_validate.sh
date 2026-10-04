@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="6.8.6"
+VERSION="6.8.7"
 LINUX_PLATFORM="${LINUX_PLATFORM:-linux/amd64}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
