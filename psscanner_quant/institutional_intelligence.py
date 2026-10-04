@@ -385,6 +385,23 @@ def cached_summary()->Dict[str,Any]:
             "scope_note":"Compact passive summary not produced yet; deep institutional evidence remains separate."}
 
 
+def backfill_compact_summary()->Dict[str,Any]:
+    """Create the v6.8.7 compact summary from the last persisted deep snapshot offline."""
+    existing=get_state("institutional_intelligence_summary",{}) or {}
+    if existing:
+        with _LOCK:
+            _SUMMARY_CACHE.clear();_SUMMARY_CACHE.update(dict(existing))
+        return {"status":"EXISTING","summary":dict(existing)}
+    deep=get_state("institutional_intelligence",{}) or {}
+    if not deep:
+        return {"status":"NO_PERSISTED_SNAPSHOT","summary":{}}
+    summary=_compact_summary(deep)
+    set_state("institutional_intelligence_summary",summary)
+    with _LOCK:
+        _SUMMARY_CACHE.clear();_SUMMARY_CACHE.update(summary)
+    return {"status":"BACKFILLED","summary":summary}
+
+
 def cached_status()->Dict[str,Any]:
     with _LOCK:
         if _CACHE:return dict(_CACHE)
