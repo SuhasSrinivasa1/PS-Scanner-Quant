@@ -5,6 +5,13 @@ import json
 import sys
 import time
 import urllib.request
+import zipfile
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0,str(ROOT))
+from psscanner_quant.constants import VERSION
 
 BASE="http://127.0.0.1:8765"
 
@@ -33,7 +40,7 @@ def get(path, *, timeout=6.0, attempts=4):
 
 
 ping=get("/api/ping",timeout=2,attempts=3)
-if ping.get("version")!="6.8.10":fail("runtime version is not 6.8.10")
+if ping.get("version")!=VERSION:fail(f"runtime version is not {VERSION}")
 
 health_started=time.monotonic()
 health=get("/api/health",timeout=3,attempts=4)
@@ -97,9 +104,37 @@ perf=get("/api/performance?group_by=book&limit=1000",timeout=6)
 policy=perf.get("outcome_policy") or {}
 perf_contract=perf.get("performance_contract") or {}
 if "excluded" not in str(policy.get("voids") or "").lower():fail("performance VOID exclusion policy missing")
-if perf_contract.get("passive_bounded") is not True:fail("performance endpoint is not using the bounded passive contract")
-if perf_contract.get("network_calls") is not False:fail("performance endpoint must not make network calls")
 if perf.get("complete") is not True:fail("performance endpoint returned degraded telemetry: "+str(perf.get("degraded_reason") or perf.get("status")))
+if perf_contract.get("passive_cached") is not True:fail("performance endpoint is not using the passive cached contract")
+if perf_contract.get("background_precomputed") is not True:fail("performance endpoint was not background-precomputed")
+if perf_contract.get("request_path_db_connections") != 0:fail("performance endpoint used request-path database work")
+if perf_contract.get("network_calls") is not False:fail("performance endpoint must not make network calls")
+if perf_contract.get("partial_rows_published") is not False:fail("performance endpoint may publish partial rows")
+if perf_contract.get("selected_index")!="idx_recs_state_closed_perf_cover":fail("performance passive cache did not use the covering index")
+
+international=get("/api/international/board",timeout=4,attempts=3)
+international_contract=international.get("cache_contract") or {}
+if international_contract.get("ready") is not True:fail("International passive cache is not ready")
+if international_contract.get("passive_cached") is not True:fail("International endpoint is not cache-only")
+if international_contract.get("request_path_db_connections") != 0:fail("International endpoint used request-path database work")
+if international_contract.get("network_calls") is not False:fail("International endpoint may perform network work")
+
+support=get("/api/support/export/status",timeout=3,attempts=3)
+if support.get("ready") is not True:fail("support export is not ready")
+if support.get("last_error"):fail("support export background build failed: "+str(support.get("last_error")))
+if support.get("compression")!="DEFLATE_LEVEL_1":fail("support export is not using background DEFLATE compression")
+support_path=Path(str(support.get("path") or ""))
+if not support_path.exists():fail("support export file does not exist")
+try:
+    with zipfile.ZipFile(support_path,"r") as z:
+        bad=z.testzip()
+except Exception as exc:
+    fail("support export is not a valid ZIP: "+str(exc))
+if bad:fail("support export ZIP contains a corrupt member: "+str(bad))
+compressed=int(support.get("size_bytes") or 0)
+uncompressed=int(support.get("uncompressed_size_bytes") or 0)
+if compressed<=0 or uncompressed<=0:fail("support export size telemetry is missing")
+if compressed>=uncompressed:fail("support export compression did not reduce retained log/audit size")
 
 diag=get("/api/diagnostics/no-trade?limit=4",timeout=6)
 execution=get("/api/execution/analytics?limit=20",timeout=6)
@@ -123,6 +158,9 @@ print(json.dumps({
     "algorithm_contract":algorithm_contract,
     "performance_rows_scanned":perf.get("rows_scanned"),
     "performance_contract":perf_contract,
+    "international_cache_contract":international_contract,
+    "support_export":{"size_bytes":compressed,"uncompressed_size_bytes":uncompressed,
+                      "compression_ratio":support.get("compression_ratio"),"compression":support.get("compression")},
     "diagnostic_books":len(diag.get("books") or {}),
     "execution_orders_scanned":execution.get("orders_scanned"),
     "backup_policy":backups.get("policy"),

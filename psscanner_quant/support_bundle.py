@@ -119,17 +119,27 @@ def _build_to_path(path:Path)->Dict[str,Any]:
         "format":"LOG_TEXT_PLUS_JSONL_DIAGNOSTICS",
         "note":"Raw service logs are secret-value redacted. Database exports exclude credential storage and redact secret-named fields.",
     }
-    with zipfile.ZipFile(tmp,"w",compression=zipfile.ZIP_STORED,allowZip64=True) as z:
+    with zipfile.ZipFile(tmp,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=1,allowZip64=True) as z:
         z.writestr("manifest.json",json.dumps(manifest,indent=2,default=str))
         log_count=_write_logs(z,secrets)
         table_counts=_write_db_exports(z,secrets)
     os.replace(tmp,path)
+    compressed_size=path.stat().st_size if path.exists() else None
+    uncompressed_size=0
+    try:
+        with zipfile.ZipFile(path,"r") as check:
+            uncompressed_size=sum(int(i.file_size or 0) for i in check.infolist())
+    except Exception:
+        uncompressed_size=0
+    ratio=(float(compressed_size)/float(uncompressed_size)) if compressed_size and uncompressed_size else None
     return {
         "ready":True,"path":str(path),"generated_at":generated,"last_error":None,
         "elapsed_ms":round((time.monotonic()-started)*1000.0,1),
-        "size_bytes":path.stat().st_size if path.exists() else None,
+        "size_bytes":compressed_size,"uncompressed_size_bytes":uncompressed_size,
+        "compression_ratio":round(ratio,4) if ratio is not None else None,
+        "compression":"DEFLATE_LEVEL_1",
         "log_files":log_count,"table_rows":table_counts,
-        "policy":"BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6810",
+        "policy":"BACKGROUND_PREBUILT_SANITIZED_SUPPORT_BUNDLE_V6811",
     }
 
 

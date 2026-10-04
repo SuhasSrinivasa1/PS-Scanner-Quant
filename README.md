@@ -1,16 +1,18 @@
-# PS Scanner Quant v6.8.10
+# PS Scanner Quant v6.8.11
 
-v6.8.10 is the current release candidate. It is a narrow production-runtime reliability release based on the real-Mac v6.8.9 stress run.
+v6.8.11 is the current release candidate. It is a narrow acceptance/release-plumbing fix based on the real-Mac v6.8.10 acceptance run.
 
-The v6.8.9 install and validator passed, but live-worker testing still showed multi-second passive health scheduling delays, bounded Performance degradation, and timeouts on International and Export All Logs. v6.8.10 completes the passive architecture: health is pure in-memory, common Performance views are precomputed from one ledger snapshot, International/Global-to-India is precomputed, and the sanitized support ZIP is built in background and served as a completed file. Global-to-India retains full NSE breadth with more cooperative scheduling yields.
+v6.8.10 successfully fixed the live request-path contention: health became consistently sub-second and pure-memory, Performance returned all 196 CLOSED rows from its passive cache, and International returned from its passive cache. The remaining issues were a stale validator assertion that still expected the old `passive_bounded` contract and an uncompressed ~394 MB prebuilt support ZIP that could not complete the explicit 10-second localhost acceptance download.
 
-No trading threshold, risk limit, frozen-identity rule, Static-IP scope, or Champion/Challenger promotion rule changes.
+v6.8.11 makes the validator enforce the current `passive_cached/background_precomputed` contract and validate International/support-export readiness. The support bundle is now compressed with low-cost DEFLATE level 1 during its existing background/pre-launch build; clicking Export still performs no bundle construction.
+
+No trading threshold, risk limit, evidence rule, frozen-identity rule, Static-IP scope, breadth rule, or Champion/Challenger promotion rule changes.
 
 See:
+- `RELEASE_v6.8.11.md`
+- `ARCHITECTURE_AUDIT_v6.8.11.md`
 - `RELEASE_v6.8.10.md`
 - `ARCHITECTURE_AUDIT_v6.8.10.md`
-- `RELEASE_v6.8.9.md`
-- `ARCHITECTURE_AUDIT_v6.8.9.md`
 
 # PS Scanner Quant v6.8.1 — Bounded Performance Analytics Reliability
 

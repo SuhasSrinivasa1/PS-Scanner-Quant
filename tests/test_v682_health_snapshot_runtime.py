@@ -19,7 +19,7 @@ class V682HealthSnapshotRuntimeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.10")
+        self.assertEqual(VERSION, "6.8.11")
 
     def test_background_health_snapshot_prioritizes_execution_and_http_is_db_free(self):
         producer = inspect.getsource(health_snapshot.refresh)
