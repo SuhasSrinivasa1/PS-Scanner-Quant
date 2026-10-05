@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -98,6 +100,41 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
         s=self.text("install.sh")
         self.assertIn('no settings.json survived; runtime defaults will initialize cleanly',s)
         self.assertIn('Ledger migration skipped: no prior SQLite database survived.',s)
+
+    def test_schema_bootstrap_runs_before_migrations_and_unit_suite(self):
+        s=self.text("install.sh")
+        schema=s.index("Recovery database schema: READY")
+        settings=s.index("v6.4.3 settings migration")
+        suite=s.index("./.venv/bin/python -m unittest discover -s tests -v")
+        self.assertLess(schema,settings)
+        self.assertLess(schema,suite)
+        self.assertIn("from psscanner_quant import db as dbmod",s)
+        self.assertIn("dbmod.init_db()",s)
+        self.assertIn("PRAGMA quick_check",s)
+
+    def test_empty_existing_sqlite_is_repaired_to_full_schema(self):
+        from psscanner_quant import db as dbmod
+        old=dbmod.DB_PATH
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/"partial.db"
+            sqlite3.connect(str(p)).close()
+            try:
+                dbmod.DB_PATH=p
+                dbmod.init_db()
+                con=sqlite3.connect(str(p))
+                tables={r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                qc=con.execute("PRAGMA quick_check").fetchone()[0]
+                con.close()
+                self.assertTrue({"system_state","recommendations","trade_decisions","scan_runs"}.issubset(tables))
+                self.assertEqual(qc,"ok")
+            finally:
+                dbmod.DB_PATH=old
+
+    def test_corrupt_recovery_database_is_quarantined_not_deleted(self):
+        s=self.text("install.sh")
+        self.assertIn('".damaged_recovery_" + stamp',s)
+        self.assertIn('os.replace(p,forensic)',s)
+        self.assertNotIn('unlink()',s)
 
 
 if __name__=="__main__":
