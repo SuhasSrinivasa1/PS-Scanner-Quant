@@ -161,6 +161,47 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
         self.assertIn('os.replace(p,forensic)',s)
         self.assertNotIn('unlink()',s)
 
+    def test_ui_exposes_secure_groww_totp_and_static_ip_setup(self):
+        ui=self.text("static/index.html")
+        self.assertIn("Groww TOTP Credentials",ui)
+        self.assertIn('id="growwTokenInput"',ui)
+        self.assertIn('id="growwSecretInput"',ui)
+        self.assertIn('type="password"',ui)
+        self.assertIn("/api/groww/configure-totp",ui)
+        self.assertIn('id="staticIpInput"',ui)
+        self.assertIn("Save credentials & verify",ui)
+        self.assertIn("values are never prefilled",ui)
+
+    def test_groww_totp_ui_api_is_local_only_and_secret_free(self):
+        main=self.text("psscanner_quant/main.py")
+        self.assertIn('@app.post("/api/groww/configure-totp")',main)
+        self.assertIn('host not in ("127.0.0.1","::1","localhost")',main)
+        self.assertIn('"secret_values_returned":False',main)
+        self.assertIn('"storage":"LOCAL_CHMOD_600"',main)
+        self.assertNotIn('"totp_token":payload.totp_token',main)
+        self.assertNotIn('"totp_secret":payload.totp_secret',main)
+
+    def test_broker_configure_totp_writes_complete_pair_mode_0600(self):
+        import os
+        from psscanner_quant import broker as broker_mod
+        old=broker_mod.CREDENTIALS_PATH
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/"groww_credentials.json"
+            try:
+                broker_mod.CREDENTIALS_PATH=p
+                b=broker_mod.GrowwBroker()
+                out=b.configure_totp("test-token-123","test-secret-456")
+                raw=json.loads(p.read_text())
+                self.assertEqual(raw["auth_mode"],"totp")
+                self.assertEqual(raw["totp_token"],"test-token-123")
+                self.assertEqual(raw["totp_secret"],"test-secret-456")
+                self.assertEqual(out["auth_mode"],"totp")
+                self.assertNotIn("totp_token",out)
+                self.assertNotIn("totp_secret",out)
+                self.assertEqual(os.stat(p).st_mode & 0o777,0o600)
+            finally:
+                broker_mod.CREDENTIALS_PATH=old
+
 
 if __name__=="__main__":
     unittest.main()
