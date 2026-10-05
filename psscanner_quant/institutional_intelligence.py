@@ -426,7 +426,53 @@ def _deal_signal(symbol:str,deals:List[Dict[str,Any]])->Dict[str,Any]:
             "net_value_rupees":round(net,2),"direction":"BUY" if net>0 else ("SELL" if net<0 else "NEUTRAL")}
 
 
+_OWNERSHIP_CACHE:Dict[str,Dict[str,Any]]={}
+_OWNERSHIP_CACHE_AT=0.0
+
+
+def prime_ownership_cache(symbols, ttl_seconds:float=300.0)->Dict[str,Dict[str,Any]]:
+    global _OWNERSHIP_CACHE_AT
+    syms=[]
+    for raw in symbols or []:
+        s=str(raw or "").upper()
+        if s and s not in syms:syms.append(s)
+    if not syms:return {}
+    if _OWNERSHIP_CACHE and time.time()-_OWNERSHIP_CACHE_AT<=ttl_seconds and all(s in _OWNERSHIP_CACHE for s in syms):
+        return {s:dict(_OWNERSHIP_CACHE.get(s) or {}) for s in syms}
+    grouped={s:[] for s in syms}
+    try:
+        for pos in range(0,len(syms),700):
+            chunk=syms[pos:pos+700];marks=",".join("?" for _ in chunk)
+            with db(timeout_seconds=.5) as con:
+                rs=con.execute(f"SELECT symbol,asof,payload_json FROM fundamental_snapshots WHERE symbol IN ({marks}) ORDER BY symbol,asof DESC",tuple(chunk)).fetchall()
+            counts={}
+            for r in rs:
+                s=str(r[0]).upper();counts[s]=counts.get(s,0)+1
+                if counts[s]<=12:grouped.setdefault(s,[]).append((r[1],r[2]))
+    except Exception:
+        grouped={s:[] for s in syms}
+    for s,rows in grouped.items():
+        vals=[]
+        for asof,payload_json in rows:
+            try:
+                d=json.loads(payload_json or "{}");v=d.get("heldPercentInstitutions")
+                if v is not None:vals.append((asof,float(v)))
+            except Exception:continue
+        if not vals:out={"status":"UNKNOWN","reason":"no point-in-time institutional ownership snapshots"}
+        else:
+            latest=vals[0];older=next((x for x in vals[1:] if x[1]!=latest[1]),None)
+            out={"status":"READY","latest_asof":latest[0],"latest":latest[1],"prior_asof":older[0] if older else None,
+                 "prior":older[1] if older else None,"change":round(latest[1]-older[1],6) if older else None,
+                 "policy":"PROSPECTIVE_CAPTURE_ONLY_NO_HISTORICAL_BACKFILL"}
+        _OWNERSHIP_CACHE[s]=out
+    _OWNERSHIP_CACHE_AT=time.time()
+    return {s:dict(_OWNERSHIP_CACHE.get(s) or {}) for s in syms}
+
+
 def _ownership_change(symbol:str)->Dict[str,Any]:
+    sym=symbol.upper()
+    cached=_OWNERSHIP_CACHE.get(sym)
+    if cached is not None:return dict(cached)
     try:
         with db(timeout_seconds=.35) as con:
             rs=con.execute("SELECT asof,payload_json FROM fundamental_snapshots WHERE symbol=? ORDER BY asof DESC LIMIT 12",(symbol.upper(),)).fetchall()
