@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+from threading import RLock
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from .config import load_settings
 from .db import db, health, now_iso
+
+_NEGATIVE_CACHE:Dict[str,float]={}
+_NEGATIVE_LOCK=RLock()
+_NEGATIVE_TTL_SECONDS=6*3600.0
 
 _FIELDS = [
     "marketCap","enterpriseValue","trailingPE","forwardPE","priceToBook","enterpriseToEbitda","enterpriseToRevenue",
@@ -67,8 +73,16 @@ def get_asof(symbol:str, at:datetime) -> Dict[str,Any]:
     return d
 
 
+def _negative_cached(symbol:str)->bool:
+    sym=symbol.upper()
+    with _NEGATIVE_LOCK:at=_NEGATIVE_CACHE.get(sym)
+    return bool(at is not None and time.monotonic()-float(at)<=_NEGATIVE_TTL_SECONDS)
+
+
 def refresh(symbol: str) -> Dict[str,Any]:
-    ticker=symbol.upper()+".NS"
+    sym=symbol.upper()
+    if _negative_cached(sym):return {}
+    ticker=sym+".NS"
     try:
         import yfinance as yf
         t=yf.Ticker(ticker);info=t.info or {}
@@ -91,7 +105,10 @@ def refresh(symbol: str) -> Dict[str,Any]:
         payload["_source"]=source;payload["_asof"]=ts;payload["_point_in_time"]=True
         return payload
     except Exception as exc:
-        health("fundamentals","WARN",f"{symbol}: {exc}")
+        msg=str(exc);low=msg.lower()
+        if any(x in low for x in ("404","quote not found","no fundamentals data","possibly delisted","no timezone found")):
+            with _NEGATIVE_LOCK:_NEGATIVE_CACHE[sym]=time.monotonic()
+        health("fundamentals","WARN",f"{symbol}: {msg}"[:240])
         return {}
 
 
@@ -125,15 +142,16 @@ def quality_score(f: Dict[str,Any]) -> float:
 def refresh_batch(symbols, limit: int = 4) -> Dict[str, Any]:
     from .db import get_state, set_state
     syms=list(symbols or [])
-    if not syms:return {"attempted":0,"ready":0}
+    if not syms:return {"attempted":0,"ready":0,"skipped_negative_cache":0}
     cursor=int(get_state("fundamentals_cursor",0) or 0)%len(syms)
     chosen=[syms[(cursor+i)%len(syms)] for i in range(min(limit,len(syms)))]
-    ready=0
+    ready=0;skipped=0
     for s in chosen:
+        if _negative_cached(s):skipped+=1;continue
         if refresh(s):ready+=1
     set_state("fundamentals_cursor",(cursor+len(chosen))%len(syms))
-    return {"attempted":len(chosen),"ready":ready,"cursor":cursor}
-
+    return {"attempted":len(chosen),"ready":ready,"skipped_negative_cache":skipped,"cursor":cursor,
+            "negative_cache_ttl_seconds":_NEGATIVE_TTL_SECONDS}
 
 def snapshot_status()->Dict[str,Any]:
     with db() as con:
