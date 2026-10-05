@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
-from .constants import IST, GLOBAL_INDIA_FREEZE_TIME, SHORT_HARD_EXIT
+from .constants import IST, GLOBAL_INDIA_FREEZE_TIME, SHORT_HARD_EXIT, MARKET_OPEN
 from .config import load_settings
 from .data import universe, history, liquidity_rank, full_nse_symbols, history_summary_snapshot
 from .db import db, get_state, now_iso, set_state, health
@@ -350,7 +350,8 @@ def freeze_global_india_board() -> int:
                 'short_execution_policy':'BEARISH_WEEKLY_RESEARCH_MAY_ONLY_EXECUTE_AS_SAME_DAY_MIS_WITH_15:00_EXIT',
                 'learning_policy':'Global outcomes are research evidence only; no direct Champion promotion without Indian OOS validation.',
                 'trade_intelligence':ti,'institutional_context':cand.get('institutional_context'),
-                'evidence_fabric_policy':cand.get('evidence_fabric_policy'),'publication_policy_version':'V689_GLOBAL_INDIA_WEEKLY_APPEND_ONLY'}
+                'evidence_fabric_policy':cand.get('evidence_fabric_policy'),'publication_policy_version':'V689_GLOBAL_INDIA_WEEKLY_APPEND_ONLY',
+                'activation_pending':bool(t<MARKET_OPEN),'entry_activation_policy':'FIRST_FRESH_NSE_QUOTE_AT_OR_AFTER_09_15'}
             rid=_insert_rec(book,cand['symbol'],side,cand['score'],cand['confidence'],cand['price'],cand['features'],
                 'GLOBAL_WEEKLY',['GLOBAL_SECTOR_CUE','GLOBAL_CROSS_ASSET','INDIA_DAILY_CONFIRM'],rationale,
                 exchange='NSE',target_pct_override=cand['target_pct'],stop_pct_override=cand['stop_pct'],period_key_override=pk)
