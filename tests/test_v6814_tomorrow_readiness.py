@@ -157,6 +157,13 @@ class V6814TomorrowReadinessTests(unittest.TestCase):
         self.assertIn('host not in ("127.0.0.1","::1","localhost")',main)
         self.assertIn("ACKNOWLEDGE_EXTERNAL_CNC_BASELINE",(Path(__file__).resolve().parents[1]/"psscanner_quant/execution_integrity.py").read_text())
 
+    def test_portfolio_ui_requires_explicit_cnc_recovery_acknowledgement(self):
+        ui=(Path(__file__).resolve().parents[1]/"static/index.html").read_text()
+        self.assertIn("Acknowledge recovery CNC baseline",ui)
+        self.assertIn("ACKNOWLEDGE_EXTERNAL_CNC_BASELINE",ui)
+        self.assertIn("ext.every(p=>String(p.product||'').toUpperCase()==='CNC')",ui)
+        self.assertNotIn("autoAcknowledgeExternal",ui)
+
 
 if __name__=="__main__":
     unittest.main()
