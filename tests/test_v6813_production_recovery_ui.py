@@ -75,6 +75,30 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
         self.assertIn('python3 "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"',s)
         self.assertNotIn('  "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"',s)
 
+    def test_damaged_install_enters_recovery_mode(self):
+        s=self.text("install.sh")
+        self.assertIn('elif [[ -d "$APP/data" || -d "$APP/logs" ]]; then',s)
+        self.assertIn('MODE="recovery"',s)
+        self.assertIn('Damaged/incomplete prior installation detected.',s)
+
+    def test_missing_credentials_do_not_abort_research_recovery(self):
+        s=self.text("install.sh")
+        self.assertIn('migrate_rc -eq 4 || $migrate_rc -eq 5',s)
+        self.assertIn('Continuing recovery with execution fail-closed',s)
+        self.assertIn('mode in ("fresh","recovery")',s)
+        self.assertIn('"$MODE" == "fresh" || "$MODE" == "recovery"',s)
+
+    def test_recovery_preserves_surviving_runtime_state(self):
+        s=self.text("install.sh")
+        self.assertIn('if [[ "$MODE" == "upgrade" || "$MODE" == "recovery" ]]; then',s)
+        self.assertIn('rsync -a "$ROLLBACK/data/" "$APP/data/"',s)
+        self.assertIn('rsync -a "$ROLLBACK/logs/" "$APP/logs/"',s)
+
+    def test_recovery_skips_missing_settings_and_database(self):
+        s=self.text("install.sh")
+        self.assertIn('no settings.json survived; runtime defaults will initialize cleanly',s)
+        self.assertIn('Ledger migration skipped: no prior SQLite database survived.',s)
+
 
 if __name__=="__main__":
     unittest.main()
