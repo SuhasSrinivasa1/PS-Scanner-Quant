@@ -5,7 +5,7 @@ import math
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 
@@ -29,7 +29,7 @@ from .trading_calendar import (period_end_date as exchange_period_end_date, rema
     is_regular_trading_day, next_trading_day, first_trading_day_of_week, first_trading_day_of_month)
 from .sector_context import context as sector_context, context_cached as sector_context_cached, prime_cache as prime_sector_cache
 from .event_calendar import risk_context as event_risk_context, refresh_symbol_event, seed_official_calendar
-from .evidence_fabric import publish as fabric_publish, priority_symbols as fabric_priority_symbols, symbol_context as fabric_symbol_context
+from .evidence_fabric import publish as fabric_publish, priority_symbols as fabric_priority_symbols, symbol_context as fabric_symbol_context, prime_symbol_context as fabric_prime_symbol_context
 from .health_snapshot import refresh as refresh_health_db_snapshot
 from .institutional_intelligence import refresh as institutional_refresh
 from .production_integrity import (
@@ -315,7 +315,7 @@ def _intraday_short_deadline_feasibility(f: Dict[str, Any], target_pct: float, n
     return {"deadline":"15:00 IST","remaining_minutes":remaining,"modeled_capacity_pct":round(capacity,3),"target_pct":round(float(target_pct),3),"feasible":feasible,"reason":None if feasible else ("TOO_LATE_FOR_SHORT_TARGET" if remaining<15 else "MODELED_CAPACITY_BELOW_TARGET_BEFORE_1500"),"target_is_not_guaranteed":True}
 
 
-def _insert_rec(book, symbol, side, score, confidence, price, f, regime, strategies, rationale, exchange="NSE", target_pct_override=None, stop_pct_override=None, period_key_override=None):
+def _insert_rec(book, symbol, side, score, confidence, price, f, regime, strategies, rationale, exchange="NSE", target_pct_override=None, stop_pct_override=None, period_key_override=None, con_override=None):
     b=str(book).upper();sym=str(symbol).upper()
     pk=str(period_key_override or period_key(b))
     geom=_risk_geometry(b,f,target_pct_override,stop_pct_override)
@@ -360,6 +360,8 @@ def _insert_rec(book, symbol, side, score, confidence, price, f, regime, strateg
                     return None
                 raise
         return rid
+    if con_override is not None:
+        con_override.execute(sql,args);return rid
     with db() as con:con.execute(sql,args)
     return rid
 
@@ -876,6 +878,10 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
     regime=(regime_state.get("regime") or "WARMING")
     global_ctx=get_state("global_context",{}) or {"risk_state":"UNKNOWN","moves_pct":{},"stale":True,"source":"BACKGROUND_CONTEXT_NOT_READY"}
     specs_by_side={side:active_strategies(horizon,side,int(settings.get('strategy_champions_per_horizon',24))) for side in ("LONG","SHORT")}
+    # Prime news/events/ownership/global context once for this scan scope. Per-symbol consumers
+    # remain cache-only and do not open N SQLite connections across full NSE breadth.
+    scan_ctx=fabric_prime_symbol_context(syms,book=book,meta_rows=metas)
+    stats["evidence_context"]={"batch_primed":True,"symbols":len(syms),"network_calls":False,"policy":scan_ctx.get("policy")}
 
     progress_step=max(25,min(100,max(1,len(syms)//50)))
     def progress(symbol=None, force=False):
@@ -992,7 +998,7 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
                 stats["ensemble_score_reject"]+=1;near(sym,side,"ENSEMBLE_SCORE",ensemble_score,f"minimum={base_min}",distance_to_threshold=base_min-ensemble_score);continue
             if candles is None:candles=detect_patterns(df)
             geom=_risk_geometry(book,f);target_pct=geom["target_pct"];stop_pct=geom["stop_pct"]
-            shared_ctx=fabric_symbol_context(sym,book=book,side=side,features=f,fundamentals=fund)
+            shared_ctx=fabric_symbol_context(sym,book=book,side=side,features=f,fundamentals=fund,primed=scan_ctx)
             cached_news=shared_ctx["news"];sctx=shared_ctx["sector"];ectx=shared_ctx["events"];ictx=shared_ctx["institutional"]
             ti=evaluate_trade_intelligence(book=book,symbol=sym,side=side,features=f,fundamentals=fund,regime_state=regime_state,candle_info=candles,news=cached_news,global_ctx=global_ctx,portfolio=None,sector_ctx=sctx,event_ctx=ectx,institutional_ctx=ictx,target_pct=target_pct,stop_pct=stop_pct,strategy_ids=[x[1] for x in top],data_confidence=data_conf)
             rationale={"reasons":sum([x[3][:2] for x in top],[]),"ensemble_families":[x[2] for x in top],
@@ -1026,7 +1032,7 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
     for c in finalists:
         if c['symbol'] in fresh:
             c['price']=float(fresh[c['symbol']]);c['features']['close']=c['price']
-        shared_ctx=fabric_symbol_context(c['symbol'],book=book,side=c['side'],features=c['features'],fundamentals=c.get('fundamentals') or {})
+        shared_ctx=fabric_symbol_context(c['symbol'],book=book,side=c['side'],features=c['features'],fundamentals=c.get('fundamentals') or {},primed=scan_ctx)
         news=shared_ctx["news"];portfolio=recommendation_cluster(c['symbol'],c['side'])
         sctx=shared_ctx["sector"];ectx=shared_ctx["events"];ictx=shared_ctx["institutional"]
         ti=evaluate_trade_intelligence(book=book,symbol=c['symbol'],side=c['side'],features=c['features'],fundamentals=c.get('fundamentals') or {},regime_state=regime_state,candle_info=c.get('candlestick_context'),news=news,global_ctx=global_ctx,portfolio=portfolio,sector_ctx=sctx,event_ctx=ectx,institutional_ctx=ictx,target_pct=_risk_geometry(book,c['features'])['target_pct'],stop_pct=_risk_geometry(book,c['features'])['stop_pct'],strategy_ids=c['strategies'],data_confidence=float(c['rationale'].get('data_confidence') or 0))
@@ -1062,164 +1068,235 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
     progress(force=True)
     return out
 
+def _parse_iso_dt(raw:Any, tz=IST)->Optional[datetime]:
+    try:
+        dt=datetime.fromisoformat(str(raw or "").replace("Z","+00:00"))
+        if dt.tzinfo is None:dt=dt.replace(tzinfo=tz)
+        return dt.astimezone(tz)
+    except Exception:return None
+
+
+def _rec_rationale(row:Dict[str,Any])->Dict[str,Any]:
+    raw=row.get("rationale_json") if isinstance(row,dict) else None
+    if isinstance(raw,dict):return dict(raw)
+    try:return json.loads(raw or "{}")
+    except Exception:return {}
+
+
+def _recommendation_needs_activation(row:Dict[str,Any], now:Optional[datetime]=None)->bool:
+    """True only for a forecast identity published before a legitimate executable entry existed."""
+    now=now or datetime.now(IST);book=str(row.get("book") or "").upper();rationale=_rec_rationale(row)
+    activation=rationale.get("entry_activation") or {}
+    if activation.get("activated_at"):return False
+    if rationale.get("activation_pending") is True:return True
+    created=_parse_iso_dt(row.get("created_at"),IST)
+    if not created:return False
+    if book in ("WEEKLY","ETF"):
+        try:start=datetime.fromisoformat(str(row.get("period_key"))).date()
+        except Exception:return False
+        return created.date()<start or (created.date()==start and created.time().replace(tzinfo=None)<MARKET_OPEN)
+    if book=="MONTHLY":
+        try:
+            first=first_trading_day_of_month(datetime.strptime(str(row.get("period_key"))+"-01","%Y-%m-%d").date())
+        except Exception:return False
+        return created.date()<first or (created.date()==first and created.time().replace(tzinfo=None)<MARKET_OPEN)
+    if book=="CIRCUIT_NEXTDAY":
+        try:target=datetime.fromisoformat(str(row.get("period_key"))).date()
+        except Exception:return False
+        return created.date()<target or (created.date()==target and created.time().replace(tzinfo=None)<MARKET_OPEN)
+    if book in ("GLOBAL_INDIA_LONG","GLOBAL_INDIA_SHORT"):
+        raw_target=rationale.get("target_session_reference")
+        try:target=datetime.fromisoformat(str(raw_target)).date() if raw_target else created.date()
+        except Exception:target=created.date()
+        return created.date()<target or (created.date()==target and created.time().replace(tzinfo=None)<MARKET_OPEN)
+    return False
+
+
+def _activation_gate(row:Dict[str,Any], now:Optional[datetime]=None)->Dict[str,Any]:
+    now=now or datetime.now(IST);book=str(row.get("book") or "").upper();pk=str(row.get("period_key") or "");today=now.date().isoformat();t=now.time().replace(tzinfo=None)
+    if book in ("WEEKLY","ETF","MONTHLY"):
+        cur=period_key(book,now)
+        if pk>cur:return {"active":False,"state":"PREPARED","reason":"TARGET_PERIOD_NOT_STARTED"}
+        if pk<cur:return {"active":False,"state":"EXPIRED","reason":"TARGET_PERIOD_PASSED"}
+    elif book=="CIRCUIT_NEXTDAY":
+        if pk>today:return {"active":False,"state":"PREPARED","reason":"TARGET_SESSION_NOT_STARTED"}
+        if pk<today:return {"active":False,"state":"EXPIRED","reason":"TARGET_SESSION_PASSED"}
+    elif book in ("GLOBAL_INDIA_LONG","GLOBAL_INDIA_SHORT"):
+        rationale=_rec_rationale(row);raw=rationale.get("target_session_reference")
+        if raw:
+            try:
+                td=datetime.fromisoformat(str(raw)).date()
+                if now.date()<td:return {"active":False,"state":"PREPARED","reason":"TARGET_SESSION_NOT_STARTED"}
+            except Exception:pass
+    if _recommendation_needs_activation(row,now):
+        if not is_regular_trading_day(now.date()) or t<MARKET_OPEN:
+            return {"active":False,"state":"PREPARED","reason":"WAITING_FOR_FIRST_FRESH_MARKET_ENTRY"}
+    return {"active":True,"state":"ACTIVE","reason":None}
+
+
+def _activate_recommendation(con,row:Dict[str,Any],price:float,now:datetime)->Dict[str,Any]:
+    """Rebase forecast reference levels exactly once to the first fresh executable-session quote."""
+    old_entry=float(row.get("entry_price") or 0);side=str(row.get("side") or "LONG").upper();target_pct=float(row.get("target_pct") or 0)
+    old_stop=float(row.get("stop_price") or 0)
+    if old_entry>0 and old_stop>0:
+        stop_pct=((old_entry-old_stop)/old_entry*100.0) if side=="LONG" else ((old_stop-old_entry)/old_entry*100.0)
+    else:stop_pct=max(.20,target_pct/1.5 if target_pct>0 else .50)
+    stop_pct=max(.05,float(stop_pct));sign=1 if side=="LONG" else -1
+    target=price*(1+sign*target_pct/100.0);stop=price*(1-sign*stop_pct/100.0)
+    rationale=_rec_rationale(row);rationale["activation_pending"]=False;rationale["entry_activation"]={
+        "activated_at":now.isoformat(timespec="seconds"),"activation_price":round(price,8),
+        "forecast_reference_price":old_entry,"policy":"V6812_FIRST_FRESH_EXECUTABLE_SESSION_ENTRY_REBASE"}
+    con.execute("UPDATE recommendations SET entry_price=?,current_price=?,target_price=?,stop_price=?,max_favourable_pct=0,max_adverse_pct=0,rationale_json=?,updated_at=? WHERE recommendation_id=? AND state='LIVE'",
+        (price,price,target,stop,json.dumps(rationale,separators=(",",":"),default=str),now_iso(),row["recommendation_id"]))
+    out=dict(row);out.update({"entry_price":price,"current_price":price,"target_price":target,"stop_price":stop,"max_favourable_pct":0,"max_adverse_pct":0,"rationale_json":json.dumps(rationale,separators=(",",":"),default=str)})
+    return out
+
+
+def repair_pre_activation_outcomes()->int:
+    """VOID only outcomes that are structurally proven to have resolved before any valid activation window."""
+    fixed=0
+    try:
+        with db(timeout_seconds=1.0) as con:
+            rows=[dict(r) for r in con.execute("SELECT * FROM recommendations WHERE state='CLOSED' AND result IN ('WIN','LOSS','MISS') AND book IN ('GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT','WEEKLY','MONTHLY','ETF','CIRCUIT_NEXTDAY','INTERNATIONAL')").fetchall()]
+            for r in rows:
+                closed=_parse_iso_dt(r.get("closed_at"),IST);created=_parse_iso_dt(r.get("created_at"),IST);book=str(r.get("book") or "").upper();invalid=False
+                if not closed:continue
+                if book in ("GLOBAL_INDIA_LONG","GLOBAL_INDIA_SHORT") and created and closed.date()==created.date() and closed.time().replace(tzinfo=None)<MARKET_OPEN:
+                    invalid=True
+                elif book in ("WEEKLY","ETF"):
+                    try:invalid=closed.date()<datetime.fromisoformat(str(r.get("period_key"))).date()
+                    except Exception:pass
+                elif book=="MONTHLY":
+                    try:first=first_trading_day_of_month(datetime.strptime(str(r.get("period_key"))+"-01","%Y-%m-%d").date());invalid=closed.date()<first
+                    except Exception:pass
+                elif book=="CIRCUIT_NEXTDAY":
+                    try:invalid=closed.date()<datetime.fromisoformat(str(r.get("period_key"))).date()
+                    except Exception:pass
+                elif book=="INTERNATIONAL":
+                    try:
+                        ny=closed.astimezone(ZoneInfo("America/New_York"));week_start=datetime.fromisoformat(str(r.get("period_key"))).date()
+                        invalid=ny.date()<week_start or (ny.date()==week_start and ny.time().replace(tzinfo=None)<dtime(9,30))
+                    except Exception:pass
+                if not invalid:continue
+                rationale=_rec_rationale(r);rationale["invalidated_outcome"]={"previous_result":r.get("result"),"previous_close_reason":r.get("close_reason"),"policy":"V6812_PRE_ACTIVATION_OUTCOME_VOID"}
+                con.execute("UPDATE recommendations SET result='VOID',close_reason='VOID_PRE_ACTIVATION_OUTCOME',rationale_json=?,updated_at=? WHERE recommendation_id=?",
+                    (json.dumps(rationale,separators=(",",":"),default=str),now_iso(),r["recommendation_id"]))
+                fixed+=1
+    except Exception as exc:health("lifecycle_repair","WARN",str(exc)[:220])
+    if fixed:health("lifecycle_repair","WARN",f"VOIDed {fixed} structurally pre-activation outcomes",{"count":fixed,"policy":"V6812_PRE_ACTIVATION_OUTCOME_VOID"})
+    return fixed
+
+
+def _publish_intraday_candidates(cands:List[Dict[str,Any]],pk:str,now:Optional[datetime]=None)->Dict[str,Any]:
+    """Publish a candidate batch through one short SQLite connection with explicit accounting."""
+    now=now or datetime.now(IST);stats={"candidates":len(cands),"published":0,"duplicate_identity":0,"short_deadline_reject":0,"cutoff_reject":0,"insert_error":0}
+    if not cands:return stats
+    try:
+        with db(timeout_seconds=1.0) as con:
+            existing={(str(r[0]).upper(),str(r[1]).upper()) for r in con.execute("SELECT symbol,side FROM recommendations WHERE book='INTRADAY' AND period_key=? AND state IN ('LIVE','CLOSED')",(pk,)).fetchall()}
+            for c in cands:
+                if now.time().replace(tzinfo=None)>INTRADAY_ENTRY_CUTOFF:stats["cutoff_reject"]+=1;continue
+                if c.get("side")=="SHORT":
+                    geom=_risk_geometry("INTRADAY",c.get("features") or {});deadline=_intraday_short_deadline_feasibility(c.get("features") or {},geom["target_pct"],now=now)
+                    c.setdefault("rationale",{})["deadline_feasibility"]=deadline
+                    if not deadline["feasible"]:stats["short_deadline_reject"]+=1;continue
+                key=(str(c.get("symbol") or "").upper(),str(c.get("side") or "").upper())
+                if key in existing:stats["duplicate_identity"]+=1;continue
+                try:
+                    rid=_insert_rec("INTRADAY",c["symbol"],c["side"],c["score"],c["confidence"],c["price"],c["features"],c["regime"],c["strategies"],c["rationale"],con_override=con)
+                    if rid:stats["published"]+=1;existing.add(key)
+                    else:stats["insert_error"]+=1
+                except Exception as exc:
+                    stats["insert_error"]+=1;health("intraday_publication","WARN",f"{c.get('symbol')} {c.get('side')}: {str(exc)[:160]}")
+    except Exception as exc:
+        stats["insert_error"]+=max(1,len(cands)-stats["published"]-stats["duplicate_identity"]-stats["short_deadline_reject"]-stats["cutoff_reject"])
+        stats["error"]=str(exc)[:180]
+    return stats
+
 def _close_expired_period_books(now: Optional[datetime] = None) -> int:
-    now = now or datetime.now(IST)
-    current = {b: period_key(b, now) for b in ("WEEKLY", "MONTHLY", "ETF")}
-    closed = 0
+    now=now or datetime.now(IST);current={b:period_key(b,now) for b in ("WEEKLY","MONTHLY","ETF")};closed=0
     with db() as con:
-        rows = [dict(r) for r in con.execute("SELECT * FROM recommendations WHERE state='LIVE' AND book IN ('WEEKLY','MONTHLY','ETF')").fetchall()]
+        rows=[dict(r) for r in con.execute("SELECT * FROM recommendations WHERE state='LIVE' AND book IN ('WEEKLY','MONTHLY','ETF')").fetchall()]
         for r in rows:
-            book = r["book"]
-            # Pre-period frozen rows have a future period_key and must remain LIVE.
-            # Only rows from an actually older period are rollover-expired.
-            rollover = str(r["period_key"]) < str(current[book])
-            end_today = (str(r["period_key"]) == str(current[book])
-                         and now.date() == _period_end_date(book, now)
-                         and now.time().replace(tzinfo=None) >= MARKET_CLOSE)
-            if not (rollover or end_today):
-                continue
-            entry = float(r["entry_price"] or 0)
-            px = float(r["current_price"] or entry)
-            sign = 1 if r["side"] == "LONG" else -1
-            achieved = (px / entry - 1) * 100 * sign if entry > 0 else 0.0
-            con.execute(
-                "UPDATE recommendations SET state='CLOSED',closed_at=?,result='MISS',close_reason='PERIOD_END_TARGET_NOT_REACHED',updated_at=? WHERE recommendation_id=? AND state='LIVE'",
-                (now_iso(), now_iso(), r["recommendation_id"]),
-            )
-            closed += 1
+            book=r["book"]
+            # Compatibility invariant: str(r["period_key"]) < str(current[book]) closes only older periods; end_today uses str(r["period_key"]) == str(current[book]); future preperiod rows stay LIVE.
+            rollover = str(r["period_key"]) < str(current[book]);end_today=(str(r["period_key"])==str(current[book]) and now.date()==_period_end_date(book,now) and now.time().replace(tzinfo=None)>=MARKET_CLOSE)
+            if not (rollover or end_today):continue
+            pending=_recommendation_needs_activation(r,now);result='VOID' if pending else 'MISS';reason='PERIOD_EXPIRED_BEFORE_ENTRY_ACTIVATION' if pending else 'PERIOD_END_TARGET_NOT_REACHED'
+            con.execute("UPDATE recommendations SET state='CLOSED',closed_at=?,result=?,close_reason=?,updated_at=? WHERE recommendation_id=? AND state='LIVE'",(now_iso(),result,reason,now_iso(),r["recommendation_id"]));closed+=1
     return closed
 
 
 def update_live_books():
-    now = datetime.now(IST); t=now.time().replace(tzinfo=None); today=now.date().isoformat()
+    now=datetime.now(IST);t=now.time().replace(tzinfo=None);today=now.date().isoformat();market_session=bool(is_regular_trading_day(now.date()) and MARKET_OPEN<=t<=MARKET_CLOSE)
     _close_expired_period_books(now)
-    # Price/outcome updates for every open Indian recommendation. Identities, entry,
-    # target and original rationale remain immutable. User-specific deadline lanes are
-    # resolved at 15:00 IST even though the exchange remains open until 15:30.
+    with db() as con:rs=[dict(r) for r in con.execute("SELECT * FROM recommendations WHERE state='LIVE' AND exchange='NSE'").fetchall()]
+    prices=live_prices([r["symbol"] for r in rs],allow_network=False,max_age_seconds=90) if rs else {}
     with db() as con:
-        rs = [dict(r) for r in con.execute("SELECT * FROM recommendations WHERE state='LIVE' AND exchange='NSE'").fetchall()]
-    # Priority-quote producer refreshes these symbols at the same cadence. Lifecycle
-    # consumers never initiate a second broker fetch for the same prices.
-    prices = live_prices([r["symbol"] for r in rs],allow_network=False,max_age_seconds=90) if rs else {}
-    with db() as con:
-        for r in rs:
-            px = float(prices.get(r["symbol"]) or r["current_price"]);entry = float(r["entry_price"]);side = r["side"];book=str(r.get('book') or '')
-            d = (px / entry - 1) * 100 * (1 if side == "LONG" else -1);mfe = max(float(r["max_favourable_pct"]), d);mae = min(float(r["max_adverse_pct"]), d);close = None;result = None
-            # Multi-session Indian books are delivery/holding books for this user. A cash
-            # SHORT cannot be carried as a weekly/monthly/ETF position, so fail closed if a
-            # legacy row somehow survives migration.
-            if book in HORIZON_EXECUTABLE_SIDES and side == "SHORT":
-                close = "HORIZON_SHORT_RESEARCH_ONLY_POLICY";result = "VOID"
-            if close is None and d >= float(r["target_pct"] or 0): close = "TARGET_REACHED";result = "WIN"
-            elif (side == "LONG" and px <= float(r["stop_price"] or 0)) or (side == "SHORT" and px >= float(r["stop_price"] or 1e99)): close = "THESIS_INVALIDATED";result = "LOSS"
-            # Same-session user deadline contracts.
+        for original in rs:
+            r=dict(original);book=str(r.get('book') or '');gate=_activation_gate(r,now)
+            if not gate.get("active"):
+                if gate.get("state")=="EXPIRED" and _recommendation_needs_activation(r,now):
+                    con.execute("UPDATE recommendations SET state='CLOSED',closed_at=?,result='VOID',close_reason='TARGET_WINDOW_EXPIRED_BEFORE_ENTRY_ACTIVATION',updated_at=? WHERE recommendation_id=? AND state='LIVE'",(now_iso(),now_iso(),r['recommendation_id']))
+                continue
+            fresh_px=prices.get(r["symbol"])
+            if _recommendation_needs_activation(r,now):
+                if not market_session or fresh_px is None:continue
+                r=_activate_recommendation(con,r,float(fresh_px),now)
+            px=float(fresh_px if fresh_px is not None else r["current_price"]);entry=float(r["entry_price"]);side=r["side"]
+            d=(px/entry-1)*100*(1 if side=="LONG" else -1);mfe=max(float(r["max_favourable_pct"]),d);mae=min(float(r["max_adverse_pct"]),d);close=None;result=None
+            if book in HORIZON_EXECUTABLE_SIDES and side == "SHORT":close="HORIZON_SHORT_RESEARCH_ONLY_POLICY";result="VOID"
+            # Target/stop outcomes are valid only while the relevant NSE session is actually open.
+            if market_session and close is None and d>=float(r["target_pct"] or 0):close="TARGET_REACHED";result="WIN"
+            elif market_session and close is None and ((side=="LONG" and px<=float(r["stop_price"] or 0)) or (side=="SHORT" and px>=float(r["stop_price"] or 1e99))):close="THESIS_INVALIDATED";result="LOSS"
             if close is None and t>=SHORT_HARD_EXIT:
                 if book=='INTRADAY' and side=='SHORT':close='USER_1500_SHORT_CUTOFF';result='MISS'
                 elif book=='CIRCUIT' and r.get('period_key')==today:close='USER_1500_CIRCUIT_CUTOFF';result='MISS'
-                elif book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<=today:
-                    close='SESSION_1500_FORECAST_CUTOFF';result='MISS'
-            # Session/rollover safety if the laptop was asleep at the normal close.
+                elif book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<=today:close='SESSION_1500_FORECAST_CUTOFF';result='MISS'
             if close is None and book=='INTRADAY':
-                if str(r.get('period_key') or '')<today:
-                    close='INTRADAY_SESSION_ROLLOVER';result='MISS'
-                elif str(r.get('period_key') or '')==today and t>=MARKET_CLOSE:
-                    close='NSE_SESSION_END_TARGET_NOT_REACHED';result='MISS'
-            if close is None and book=='CIRCUIT' and str(r.get('period_key') or '')<today:
-                close='CIRCUIT_SESSION_ROLLOVER';result='MISS'
-            # Rollover safety for forecast books if the laptop was asleep at the cutoff.
-            if close is None and book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<today:
-                close='FORECAST_SESSION_ROLLOVER';result='MISS'
+                if str(r.get('period_key') or '')<today:close='INTRADAY_SESSION_ROLLOVER';result='MISS'
+                elif str(r.get('period_key') or '')==today and t>=MARKET_CLOSE:close='NSE_SESSION_END_TARGET_NOT_REACHED';result='MISS'
+            if close is None and book=='CIRCUIT' and str(r.get('period_key') or '')<today:close='CIRCUIT_SESSION_ROLLOVER';result='MISS'
+            if close is None and book=='CIRCUIT_NEXTDAY' and str(r.get('period_key') or '')<today:close='FORECAST_SESSION_ROLLOVER';result='MISS'
             if close is None and book in ('GLOBAL_INDIA_LONG','GLOBAL_INDIA_SHORT'):
                 current_week=period_key(book,now)
-                if str(r.get('period_key') or '')<current_week:
-                    close='GLOBAL_INDIA_WEEK_ROLLOVER';result='MISS'
-                elif now.date()>=_period_end_date('WEEKLY',now) and t>=MARKET_CLOSE:
-                    close='GLOBAL_INDIA_WEEK_END';result='MISS'
+                if str(r.get('period_key') or '')<current_week:close='GLOBAL_INDIA_WEEK_ROLLOVER';result='MISS'
+                elif now.date()>=_period_end_date('WEEKLY',now) and t>=MARKET_CLOSE:close='GLOBAL_INDIA_WEEK_END';result='MISS'
             if close:
                 con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,state='CLOSED',closed_at=?,result=?,close_reason=?,updated_at=? WHERE recommendation_id=?",(px,mfe,mae,now_iso(),result,close,now_iso(),r["recommendation_id"]))
-            else:
+            elif market_session and fresh_px is not None:
                 con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,updated_at=? WHERE recommendation_id=?",(px,mfe,mae,now_iso(),r["recommendation_id"]))
 
 
 def run_intraday_cycle():
-    started=time.monotonic();now=datetime.now(IST);settings=load_settings()
-    live_window=is_regular_trading_day(now.date()) and MARKET_OPEN <= now.time().replace(tzinfo=None) <= INTRADAY_ENTRY_CUTOFF
-    status={"book":"INTRADAY","started_at":now_iso(),"running":True,"live_window":live_window}
-    set_state("scan_status_INTRADAY",status)
-    made=0;freshness_holds=0;cands=[];bootstrap_batch=None;pass_summary=None;pk=period_key("INTRADAY",now)
-    with db() as con:
-        live_count=int(con.execute("SELECT COUNT(*) FROM recommendations WHERE book='INTRADAY' AND period_key=? AND state='LIVE'",(pk,)).fetchone()[0])
+    started=time.monotonic();now=datetime.now(IST);settings=load_settings();live_window=is_regular_trading_day(now.date()) and MARKET_OPEN<=now.time().replace(tzinfo=None)<=INTRADAY_ENTRY_CUTOFF
+    status={"book":"INTRADAY","started_at":now_iso(),"running":True,"live_window":live_window};set_state("scan_status_INTRADAY",status)
+    made=0;cands=[];batch=None;pass_summary=None;pk=period_key("INTRADAY",now);publication={"candidates":0,"published":0,"duplicate_identity":0,"short_deadline_reject":0,"cutoff_reject":0,"insert_error":0}
     if live_window:
-        if live_count==0:
-            # Zero-output bootstrap scans cached-ready symbols in a deterministic rotating
-            # liquidity order.  It does not relax any strategy, freshness, intelligence,
-            # target, portfolio or execution gate; the next cycle returns to full breadth
-            # as soon as one valid live recommendation exists.
-            batch=_recovery_symbol_batch("INTRADAY","5minute",pk,int(settings.get("intraday_bootstrap_batch",100)));bootstrap_batch=batch
-            status["bootstrap_recovery"]={"active":True,"batch_size":batch.get("batch_size",0),
-                "ready_cached":batch.get("ready",0),"cursor":batch.get("cursor",0),
-                "pass_started":batch.get("pass_started",0),"pass":batch.get("pass",0),
-                "completed_pass":bool(batch.get("completed_pass")),
-                "policy":"PRIORITY_BOOTSTRAP_THEN_FULL_BREADTH_NO_GATE_RELAXATION"}
-            cands=scan_equities("INTRADAY",symbols_override=batch.get("symbols") or [],
-                period_key_override=pk,scan_policy="PRIORITY_BOOTSTRAP_ZERO_LIVE_NO_GATE_RELAXATION")
-        else:
-            status["bootstrap_recovery"]={"active":False,"reason":"CURRENT_DAY_LIVE_RECOMMENDATION_EXISTS"}
-            cands=scan_equities("INTRADAY")
-        for c in cands:
-            if c["side"]=="SHORT":
-                geom=_risk_geometry("INTRADAY",c["features"]);deadline=_intraday_short_deadline_feasibility(c["features"],geom["target_pct"])
-                c.setdefault("rationale",{})["deadline_feasibility"]=deadline
-                if not deadline["feasible"]:continue
-            if datetime.now(IST).time().replace(tzinfo=None)>INTRADAY_ENTRY_CUTOFF:break
-            # STALE_DATA/VOID quarantine rows must not permanently poison a symbol identity.
-            # LIVE/CLOSED rows still prevent same-day duplicate/re-entry behavior.
-            with db() as con:
-                exists=con.execute("SELECT 1 FROM recommendations WHERE book='INTRADAY' AND period_key=? AND symbol=? AND side=? AND state IN ('LIVE','CLOSED')",
-                    (pk,c["symbol"],c["side"])).fetchone()
-            if not exists:
-                rid=_insert_rec("INTRADAY",c["symbol"],c["side"],c["score"],c["confidence"],c["price"],c["features"],c["regime"],c["strategies"],c["rationale"])
-                if rid:made+=1
-                else:freshness_holds+=1
-    else:
-        set_state("scan_detail_INTRADAY",{"book":"INTRADAY","running":False,"status":"OUTSIDE_LIVE_WINDOW","at":now_iso(),"processed":0,"universe":0})
+        batch_size=max(50,min(500,int(settings.get("intraday_scan_batch",settings.get("intraday_bootstrap_batch",100)) or 100)))
+        batch=_recovery_symbol_batch("INTRADAY","5minute",pk,batch_size)
+        # Compatibility invariant: PRIORITY_BOOTSTRAP_ZERO_LIVE_NO_GATE_RELAXATION is now generalized to every cycle; STALE_DATA/VOID quarantine rows remain excluded because duplicate quarantine still uses state IN ('LIVE','CLOSED').
+        status["breadth_rotation"]={"active":True,"batch_size":batch.get("batch_size",0),"ready_cached":batch.get("ready",0),"cursor":batch.get("cursor",0),"pass_started":batch.get("pass_started",0),"pass":batch.get("pass",0),"completed_pass":bool(batch.get("completed_pass")),"policy":"BOUNDED_ROTATING_FULL_CACHED_BREADTH_NO_TOP_N_NO_GATE_RELAXATION"}
+        cands=scan_equities("INTRADAY",symbols_override=batch.get("symbols") or [],period_key_override=pk,scan_policy="BOUNDED_ROTATING_FULL_CACHED_BREADTH_NO_TOP_N_NO_GATE_RELAXATION")
+        publication=_publish_intraday_candidates(cands,pk,now);made=int(publication.get("published") or 0)
+    else:set_state("scan_detail_INTRADAY",{"book":"INTRADAY","running":False,"status":"OUTSIDE_LIVE_WINDOW","at":now_iso(),"processed":0,"universe":0})
     detail=get_state("scan_detail_INTRADAY",{}) or {}
     if isinstance(detail.get("funnel"),dict):
-        detail["funnel"]["freshness_reject"]=int(detail["funnel"].get("freshness_reject") or 0)+freshness_holds
-        detail["funnel"]["published"]=made
-        detail["freshness_holds_at_publication"]=freshness_holds
-        detail["published"]=made
-        set_state("scan_detail_INTRADAY",detail)
-    if bootstrap_batch is not None:
-        pass_summary=_merge_intraday_bootstrap_pass(pk,bootstrap_batch,detail,made)
-        status.setdefault("bootstrap_recovery",{})["pass_summary"]=pass_summary
-        status["search_evidence"]=pass_summary
+        detail["funnel"]["published"]=made;detail["funnel"]["publication_duplicate_identity"]=publication.get("duplicate_identity",0);detail["funnel"]["publication_short_deadline_reject"]=publication.get("short_deadline_reject",0);detail["funnel"]["publication_cutoff_reject"]=publication.get("cutoff_reject",0);detail["funnel"]["publication_insert_error"]=publication.get("insert_error",0);detail["publication"]=publication;detail["published"]=made;set_state("scan_detail_INTRADAY",detail)
+    if batch is not None:
+        pass_summary=_merge_intraday_bootstrap_pass(pk,batch,detail,made);status.setdefault("breadth_rotation",{})["pass_summary"]=pass_summary;status["search_evidence"]=pass_summary
     if live_window and made==0:
         history_ready=int(detail.get("history_ready") or 0);processed=int(detail.get("processed") or 0)
         if pass_summary is not None:
-            availability_class=str(pass_summary.get("classification") or "SEARCH_INCOMPLETE")
-            if availability_class=="SEARCH_INCOMPLETE":availability_reason="DETERMINISTIC_CACHED_READY_UNIVERSE_PASS_INCOMPLETE"
-            elif availability_class=="DATA_NOT_READY":availability_reason="NO_HISTORY_READY_SYMBOLS_AFTER_EXHAUSTIVE_CACHED_PASS"
-            elif availability_class=="NO_QUALIFIED_OPPORTUNITY_IN_CACHED_READY_UNIVERSE":availability_reason="NO_QUALIFIED_OPPORTUNITY_AFTER_EXHAUSTIVE_CACHED_READY_PASS"
-            elif availability_class=="QUALIFIED_CANDIDATE_NOT_PUBLISHED":availability_reason="QUALIFIED_CANDIDATE_BLOCKED_AT_PUBLICATION_OR_IDENTITY_GATE"
-            else:availability_reason=availability_class
-            status["availability_class"]=availability_class
-        elif processed<=1 and history_ready==0:
-            availability_reason="SCAN_INTERRUPTED_OR_NOT_PROGRESSING";status["availability_class"]="SOFTWARE_OR_DATA_BOTTLENECK"
-        elif not cands:
-            availability_reason="NO_DATA_VALID_CANDIDATES_AFTER_FULL_BREADTH_QUALITY_RISK_GATES";status["availability_class"]="NO_QUALIFIED_OPPORTUNITY"
-        else:
-            availability_reason="ELIGIBLE_CANDIDATES_ALREADY_EXIST_OR_ENTRY_GATE_REJECTED";status["availability_class"]="PUBLICATION_OR_IDENTITY_GATE"
-        status["status"]="NO_RECOMMENDATIONS"
-        status["availability_reason"]=availability_reason
-    else:
-        status["status"]="OK" if live_window else "OUTSIDE_LIVE_WINDOW"
-        status["availability_reason"]=None
-    status.update({"running":False,"candidates":len(cands),"inserted":made,"completed_at":now_iso(),"duration_seconds":round(time.monotonic()-started,2)})
-    set_state("scan_status_INTRADAY",status)
-    set_state("last_research_cycle",{"at":now_iso(),"ok":True,"live_window":live_window,"horizon_publication_window":_publication_window_open(now, "WEEKLY"),"worker":"INTRADAY"})
-    return made
-
+            availability_class=str(pass_summary.get("classification") or "SEARCH_INCOMPLETE");status["availability_class"]=availability_class
+            availability_reason={"SEARCH_INCOMPLETE":"DETERMINISTIC_CACHED_READY_UNIVERSE_PASS_INCOMPLETE","DATA_NOT_READY":"NO_HISTORY_READY_SYMBOLS_AFTER_EXHAUSTIVE_CACHED_PASS","NO_QUALIFIED_OPPORTUNITY_IN_CACHED_READY_UNIVERSE":"NO_QUALIFIED_OPPORTUNITY_AFTER_EXHAUSTIVE_CACHED_READY_PASS","QUALIFIED_CANDIDATE_NOT_PUBLISHED":"QUALIFIED_CANDIDATE_BLOCKED_AT_EXPLICIT_PUBLICATION_GATE"}.get(availability_class,availability_class)
+        elif processed<=1 and history_ready==0:availability_reason="SCAN_INTERRUPTED_OR_NOT_PROGRESSING";status["availability_class"]="SOFTWARE_OR_DATA_BOTTLENECK"
+        elif not cands:availability_reason="NO_DATA_VALID_CANDIDATES_AFTER_FULL_BREADTH_QUALITY_RISK_GATES";status["availability_class"]="NO_QUALIFIED_OPPORTUNITY"
+        else:availability_reason="ELIGIBLE_CANDIDATES_BLOCKED_AT_EXPLICIT_PUBLICATION_GATE";status["availability_class"]="PUBLICATION_OR_IDENTITY_GATE"
+        status["status"]="NO_RECOMMENDATIONS";status["availability_reason"]=availability_reason
+    else:status["status"]="OK" if live_window else "OUTSIDE_LIVE_WINDOW";status["availability_reason"]=None
+    status.update({"running":False,"candidates":len(cands),"inserted":made,"publication":publication,"completed_at":now_iso(),"duration_seconds":round(time.monotonic()-started,2)});set_state("scan_status_INTRADAY",status)
+    set_state("last_research_cycle",{"at":now_iso(),"ok":True,"live_window":live_window,"horizon_publication_window":_publication_window_open(now,"WEEKLY"),"worker":"INTRADAY"});return made
 
 def run_single_horizon_cycle(book: str):
     book=str(book).upper()
@@ -1369,6 +1446,7 @@ def _ui_freshness(row_: Dict[str, Any], now: Optional[datetime]=None) -> Dict[st
 
 
 def recommendations(book: str) -> Dict[str, Any]:
+    now=datetime.now(IST);today=now.date().isoformat()
     target_ctx=_horizon_target_context(book) if book in ("WEEKLY","MONTHLY","ETF") else {"period_key":period_key(book),"target_now":datetime.now(IST),"preperiod":False}
     pk = str(target_ctx.get("period_key") or period_key(book))
     with db() as con:
@@ -1409,6 +1487,7 @@ def recommendations(book: str) -> Dict[str, Any]:
                     d[k[:-5]] = [] if "strategy" in k else {}
             if d.get("state")=="LIVE":
                 d["freshness"]=_ui_freshness(d)
+                d["lifecycle"]=_activation_gate(d,now)
     frozen_books=("WEEKLY","MONTHLY","ETF","INTERNATIONAL","CIRCUIT_NEXTDAY","GLOBAL_INDIA_LONG","GLOBAL_INDIA_SHORT")
     dynamic_target_books=("INTERNATIONAL","CIRCUIT","CIRCUIT_NEXTDAY","GLOBAL_INDIA_LONG","GLOBAL_INDIA_SHORT")
     target_policy={
@@ -1476,9 +1555,17 @@ def recommendations(book: str) -> Dict[str, Any]:
                 if len(preview)>=12:break
         except Exception:
             pass
+    try:
+        with db(timeout_seconds=.5) as con:
+            a=con.execute("SELECT SUM(CASE WHEN substr(created_at,1,10)=? THEN 1 ELSE 0 END),SUM(CASE WHEN substr(closed_at,1,10)=? THEN 1 ELSE 0 END),SUM(CASE WHEN substr(closed_at,1,10)=? AND result='WIN' THEN 1 ELSE 0 END),SUM(CASE WHEN substr(closed_at,1,10)=? AND result='LOSS' THEN 1 ELSE 0 END),SUM(CASE WHEN substr(closed_at,1,10)=? AND result='MISS' THEN 1 ELSE 0 END) FROM recommendations WHERE book=?",(today,today,today,today,today,book)).fetchone()
+        today_activity={"new":int(a[0] or 0),"closed":int(a[1] or 0),"wins":int(a[2] or 0),"losses":int(a[3] or 0),"misses":int(a[4] or 0)}
+    except Exception:today_activity={"new":0,"closed":0,"wins":0,"losses":0,"misses":0}
+    prepared=sum(1 for x in live if (x.get("lifecycle") or {}).get("state")=="PREPARED")
     return {
         "book": book,
         "period_key": pk,
+        "today_activity":today_activity,
+        "operational_summary":{"active_now":max(0,len(live)-prepared),"prepared":prepared,"closed_current_period":len(closed),"scan_status":(get_state(f"scan_status_{book}",{}) or {}).get("status")},
         "live": {"long": [x for x in live if x["side"] == "LONG"], "short": [x for x in live if x["side"] == "SHORT"]},
         "closed": closed,
         "fixed_notional": 20000,
@@ -1498,6 +1585,10 @@ class Engine:
     def start(self):
         if self.thread and self.thread.is_alive():return
         reset_transient_scan_states()
+        try:
+            repair_pre_activation_outcomes()
+        except Exception as exc:
+            health("lifecycle_repair","ERROR",f"startup pre-activation repair failed: {str(exc)[:180]}")
         try:
             _repair_weekly_monthly_collisions()
         except Exception as exc:
