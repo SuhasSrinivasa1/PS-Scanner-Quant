@@ -100,6 +100,28 @@ class GrowwBroker:
             "auth_mode": str(raw.get("auth_mode") or "") if isinstance(raw, dict) else "",
         }
 
+    def configure_totp(self, totp_token: str, totp_secret: str) -> Dict[str, Any]:
+        """Persist a complete TOTP credential pair without ever returning secret values."""
+        token=str(totp_token or "").strip()
+        secret=str(totp_secret or "").strip()
+        if not token or not secret:
+            raise ValueError("Groww TOTP token and TOTP secret are both required.")
+        with _LOCK:
+            self._write_credentials({
+                "auth_mode": "totp",
+                "totp_token": token,
+                "totp_secret": secret,
+            })
+            self._access_token=None
+            self._token_loaded_at=0.0
+            self._last_status={}
+            self._last_status_at=0.0
+        return {
+            "configured": True,
+            "auth_mode": "totp",
+            "credential_capabilities": self.credential_capabilities(),
+        }
+
     def _token_from_file(self, flat: Dict[str, Any]) -> Optional[str]:
         return _first(flat, ["access_token", "auth_token", "api_auth_token", "token"])
 
