@@ -50,7 +50,7 @@ fi
 # settings, recommendation ledger, strategy statistics, feature/history caches and audit data.
 # In a legacy migration, recover only a validated coherent Groww credential bundle.
 if [[ "$MODE" == "migration" ]]; then
-  "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"
+  python3 "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"
   chmod 600 "$TMPSECRET"
   python3 - "$TMPSECRET" <<'PY'
 import json,sys
