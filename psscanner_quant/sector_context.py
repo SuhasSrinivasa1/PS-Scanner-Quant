@@ -10,6 +10,7 @@ from .data import universe, history_summary_snapshot
 from .db import health, get_state, now_iso, set_state
 
 _CACHE: Dict[str, Any] = {"at":0.0,"snapshot":{}}
+_META_CACHE: Dict[str,str] = {}
 _LOCK=RLock()
 
 
@@ -91,26 +92,67 @@ def build_snapshot(ttl_seconds:int=900, max_peers_per_industry:int=20) -> Dict[s
         return snap
 
 
-def context(symbol:str, side:str="LONG", build_if_missing:bool=True) -> Dict[str,Any]:
-    sym=symbol.upper();row=next((x for x in universe() if str(x.get("symbol") or "").upper()==sym),{})
-    industry=str(row.get("industry") or row.get("sector") or "UNKNOWN")
-    snap=dict(_CACHE.get("snapshot") or {})
-    if not snap and build_if_missing:
-        snap=build_snapshot()
-    s=snap.get(industry) or {}
-    summaries=history_summary_snapshot([sym])
-    f=_feat(sym,summaries)
-    if not s or not f:
+def prime_symbol_meta(rows=None) -> Dict[str,str]:
+    """Prime symbol->industry metadata once for cache-only scanner consumers."""
+    global _META_CACHE
+    with _LOCK:
+        if rows is not None:
+            for r in rows:
+                sym=str((r or {}).get("symbol") or "").upper()
+                if not sym:continue
+                ind=str((r or {}).get("industry") or (r or {}).get("sector") or "UNKNOWN").strip() or "UNKNOWN"
+                _META_CACHE[sym]=ind
+        elif not _META_CACHE:
+            for r in universe():
+                sym=str(r.get("symbol") or "").upper()
+                if sym:
+                    _META_CACHE[sym]=str(r.get("industry") or r.get("sector") or "UNKNOWN").strip() or "UNKNOWN"
+        return dict(_META_CACHE)
+
+
+def _industry_for_symbol(symbol:str)->str:
+    sym=str(symbol or "").upper()
+    with _LOCK:
+        ind=_META_CACHE.get(sym)
+    if ind:return ind
+    try:
+        prime_symbol_meta()
+        with _LOCK:return _META_CACHE.get(sym,"UNKNOWN")
+    except Exception:return "UNKNOWN"
+
+
+def context_from_features(symbol:str, side:str, features:Dict[str,Any]) -> Dict[str,Any]:
+    """Compose sector evidence without a per-symbol SQLite history-summary read."""
+    sym=symbol.upper();industry=_industry_for_symbol(sym);snap=dict(_CACHE.get("snapshot") or {});s=snap.get(industry) or {}
+    try:stock_ret=float((features or {}).get("ret20") or 0)
+    except Exception:stock_ret=0.0
+    if not s:
         return {"status":"UNKNOWN","industry":industry,"reason":"sector peer snapshot not ready; scanner does not block to rebuild it"}
     sign=1 if side.upper()=="LONG" else -1
-    stock_ret=float(f.get("ret20") or 0)
+    supportive=(s.get("trend_up_pct",0)>=50 if sign>0 else s.get("trend_down_pct",0)>=50)
+    relative=stock_ret-float(s.get("median_ret20_pct") or 0)
+    return {**s,"status":"PASS" if supportive else "WARN","symbol":sym,"stock_ret20_pct":round(stock_ret,3),
+            "stock_vs_industry_ret20_pct":round(relative,3),"supportive":supportive,
+            "source":"FULL_NSE_MAPPED_INDUSTRY_PLUS_CACHED_DAILY_BREADTH_IN_MEMORY"}
+
+
+def context(symbol:str, side:str="LONG", build_if_missing:bool=True, features:Dict[str,Any]|None=None) -> Dict[str,Any]:
+    if features is not None:
+        return context_from_features(symbol,side,features)
+    sym=symbol.upper();industry=_industry_for_symbol(sym)
+    snap=dict(_CACHE.get("snapshot") or {})
+    if not snap and build_if_missing:snap=build_snapshot()
+    s=snap.get(industry) or {};summaries=history_summary_snapshot([sym]);f=_feat(sym,summaries)
+    if not s or not f:
+        return {"status":"UNKNOWN","industry":industry,"reason":"sector peer snapshot not ready; scanner does not block to rebuild it"}
+    sign=1 if side.upper()=="LONG" else -1;stock_ret=float(f.get("ret20") or 0)
     supportive=(s.get("trend_up_pct",0)>=50 if sign>0 else s.get("trend_down_pct",0)>=50)
     relative=stock_ret-float(s.get("median_ret20_pct") or 0)
     return {**s,"status":"PASS" if supportive else "WARN","symbol":sym,"stock_ret20_pct":round(stock_ret,3),"stock_vs_industry_ret20_pct":round(relative,3),"supportive":supportive,"source":"FULL_NSE_MAPPED_INDUSTRY_PLUS_CACHED_DAILY_BREADTH"}
 
-def context_cached(symbol:str, side:str="LONG") -> Dict[str,Any]:
-    return context(symbol,side,build_if_missing=False)
 
+def context_cached(symbol:str, side:str="LONG", features:Dict[str,Any]|None=None) -> Dict[str,Any]:
+    return context(symbol,side,build_if_missing=False,features=features)
 
 def status()->Dict[str,Any]:
     snap=build_snapshot();return {"industries_ready":len(snap),"source":"FULL_NSE_MAPPED_INDUSTRY_PLUS_CACHED_DAILY_BREADTH","top":sorted(snap.values(),key=lambda x:x.get("sample",0),reverse=True)[:20]}
