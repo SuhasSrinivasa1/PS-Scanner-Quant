@@ -13,6 +13,7 @@ NEW_GROWW="$(mktemp)"
 PLIST_BACKUP="$(mktemp)"
 HAD_OLD_PLIST=0
 MODE="fresh"
+MIGRATED_SECRET=0
 cleanup(){ rm -f "$TMPSECRET" "$OLD_STATUS" "$NEW_HEALTH" "$NEW_GROWW" "$PLIST_BACKUP" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -24,6 +25,8 @@ if [[ -d "$APP" ]]; then
   MODE="migration"
   if [[ -f "$APP/psscanner_quant/constants.py" ]] && grep -q 'VERSION = "6\.' "$APP/psscanner_quant/constants.py" 2>/dev/null; then
     MODE="upgrade"
+  elif [[ -d "$APP/data" || -d "$APP/logs" ]]; then
+    MODE="recovery"
   fi
 fi
 
@@ -31,6 +34,9 @@ if [[ "$MODE" == "fresh" ]]; then
   echo "No previous PS_Scanner_Final installation found."
   echo "Fresh recovery install: application state will initialize cleanly."
   echo "Groww execution will remain fail-closed until credentials are configured."
+elif [[ "$MODE" == "recovery" ]]; then
+  echo "Damaged/incomplete prior installation detected."
+  echo "Any surviving runtime data/logs will be preserved; missing credentials will not block recovery."
 fi
 
 echo "Detected mode: $MODE"
@@ -46,19 +52,31 @@ print("Existing Groww status:", g.get("status") or "UNKNOWN", "auth_mode:", g.ge
 PY
 fi
 
-# In a v6->v6 upgrade, the entire data directory is the authoritative state: credentials,
-# settings, recommendation ledger, strategy statistics, feature/history caches and audit data.
-# In a legacy migration, recover only a validated coherent Groww credential bundle.
-if [[ "$MODE" == "migration" ]]; then
+# In a v6->v6 upgrade, the entire data directory is the authoritative state.
+# In a damaged-install recovery, preserve surviving runtime state and attempt to recover
+# credentials from disk/launchd. Missing secrets must never block research recovery.
+if [[ "$MODE" == "migration" || "$MODE" == "recovery" ]]; then
+  set +e
   python3 "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"
-  chmod 600 "$TMPSECRET"
-  python3 - "$TMPSECRET" <<'PY'
+  migrate_rc=$?
+  set -e
+  if [[ $migrate_rc -eq 0 ]]; then
+    MIGRATED_SECRET=1
+    chmod 600 "$TMPSECRET"
+    python3 - "$TMPSECRET" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1]))
 print("Validated Groww auth mode:", p.get("auth_mode") or "unknown")
 print("Recovered credential capabilities:", ", ".join(k for k in ("api_key","api_secret","totp_token","totp_secret","access_token") if p.get(k)))
 print("Secret values: hidden")
 PY
+  elif [[ $migrate_rc -eq 4 || $migrate_rc -eq 5 ]]; then
+    echo "No validated Groww credential bundle survived on disk."
+    echo "Continuing recovery with execution fail-closed; configure Groww after install."
+  else
+    echo "Groww credential migration helper failed unexpectedly (exit $migrate_rc)." >&2
+    exit $migrate_rc
+  fi
 fi
 
 if [[ -f "$PLIST" ]]; then
@@ -92,7 +110,7 @@ rsync -a --delete --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --
 mkdir -p "$APP/data/secure" "$APP/logs"
 chmod +x "$APP/run.sh" "$APP/install.sh" "$APP/CONFIGURE_GROWW.command" 2>/dev/null || true
 
-if [[ "$MODE" == "upgrade" ]]; then
+if [[ "$MODE" == "upgrade" || "$MODE" == "recovery" ]]; then
   if [[ -d "$ROLLBACK/data" ]]; then rsync -a "$ROLLBACK/data/" "$APP/data/"; fi
   if [[ -d "$ROLLBACK/logs" ]]; then rsync -a "$ROLLBACK/logs/" "$APP/logs/"; fi
   echo "Preserved v6 data, credentials, settings, recommendation ledger and strategy state."
@@ -178,11 +196,22 @@ except Exception as exc:
     print("v6.4.3 ledger migration warning:",exc)
 PY2
 elif [[ "$MODE" == "migration" ]]; then
+  if [[ $MIGRATED_SECRET -eq 1 ]]; then
+    cp "$TMPSECRET" "$APP/data/secure/groww_credentials.json"
+    chmod 600 "$APP/data/secure/groww_credentials.json"
+  else
+    echo "Legacy migration has no recovered credentials; execution remains locked."
+  fi
+fi
+if [[ "$MODE" == "recovery" && $MIGRATED_SECRET -eq 1 ]]; then
   cp "$TMPSECRET" "$APP/data/secure/groww_credentials.json"
   chmod 600 "$APP/data/secure/groww_credentials.json"
-else
-  echo "Fresh install: no credentials imported."
-  echo "After installation, run CONFIGURE_GROWW.command to configure Groww securely."
+fi
+if [[ "$MODE" == "fresh" || "$MODE" == "recovery" ]]; then
+  if [[ ! -f "$APP/data/secure/groww_credentials.json" ]]; then
+    echo "No Groww credentials installed."
+    echo "After installation, run CONFIGURE_GROWW.command to configure Groww securely."
+  fi
 fi
 
 cd "$APP"
@@ -311,8 +340,8 @@ PYA
 done
 
 if [[ $groww_ok -ne 1 ]]; then
-  if [[ "$MODE" == "fresh" ]]; then
-    echo "Fresh install is healthy, but Groww is not configured yet."
+  if [[ "$MODE" == "fresh" || "$MODE" == "recovery" ]]; then
+    echo "Install/recovery is healthy, but Groww is not configured yet."
     echo "Research/data workers will initialize; manual execution remains fail-closed."
     echo "Run $APP/CONFIGURE_GROWW.command after installation."
   else
@@ -338,7 +367,7 @@ print('New app:', h.get('app'), h.get('version'))
 print('New Groww status:', g.get('status') or 'UNKNOWN')
 print('Credential capabilities:', g.get('credential_capabilities') or {})
 mode=sys.argv[4] if len(sys.argv)>4 else "upgrade"
-ok=(h.get('version')==expected and h.get('engine_alive') is True and (g.get('connected') is True or mode=="fresh"))
+ok=(h.get('version')==expected and h.get('engine_alive') is True and (g.get('connected') is True or mode in ("fresh","recovery")))
 raise SystemExit(0 if ok else 1)
 PYV
 
@@ -360,6 +389,8 @@ else
 fi
 if [[ "$MODE" == "fresh" ]]; then
   echo "Runtime state: FRESH INITIALIZATION"
+elif [[ "$MODE" == "recovery" ]]; then
+  echo "Runtime state: DAMAGED-INSTALL RECOVERY; surviving data/logs preserved where present"
 else
   echo "v6 runtime data/ledger: PRESERVED"
 fi
