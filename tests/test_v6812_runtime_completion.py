@@ -12,7 +12,7 @@ from psscanner_quant.db import now_iso
 
 class V6812RuntimeCompletionTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION,"6.8.12")
+        self.assertEqual(VERSION,"6.8.13")
 
     def test_global_india_cycle_budget_is_below_watchdog(self):
         budget=float(config._DEFAULTS["global_india_detail_budget_seconds"])
