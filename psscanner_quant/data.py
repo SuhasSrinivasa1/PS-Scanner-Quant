@@ -22,7 +22,7 @@ from .config import load_settings
 from .constants import GROWW_INSTRUMENT_CSV, IST, NIFTY500_CSV
 from .db import db, get_state, health, now_iso, set_state
 from .paths import DATA, INSTRUMENTS_PATH, UNIVERSE_PATH
-from .history_control import wait_for_slot, record_rate_limit, record_success, quarantine_status, quarantine, clear_quarantine
+from .history_control import wait_for_slot, record_rate_limit, record_success, quarantine_status, quarantine, clear_quarantine, background_request_allowed
 
 _CACHE = DATA / "history"
 _CACHE.mkdir(parents=True, exist_ok=True)
@@ -627,7 +627,7 @@ def _persist_history(path: Path, symbol: str, interval: str, candles: List[List[
     return _parse_candles(candles)
 
 
-def history(symbol: str, interval: str="1day", force: bool=False, allow_network: bool=True) -> pd.DataFrame:
+def history(symbol: str, interval: str="1day", force: bool=False, allow_network: bool=True, background: bool=False) -> pd.DataFrame:
     """Return cached candles first; require instrument metadata only for network refresh.
 
     v6.2.8 invariant: a cached-only scanner must never lose valid local candles merely
@@ -652,7 +652,7 @@ def history(symbol: str, interval: str="1day", force: bool=False, allow_network:
         return _cached_history(path)
 
     now = datetime.now(IST)
-    max_429 = max(0, int(settings.get("history_429_max_retries", 3)))
+    max_429 = 0 if background else max(0, int(settings.get("history_429_max_retries", 3)))
     cached_raw = _load_raw_candles(path)
     cached_df = _parse_candles(cached_raw)
 
@@ -701,6 +701,14 @@ def history(symbol: str, interval: str="1day", force: bool=False, allow_network:
                     break
                 quarantine(groww_symbol, interval, f"HTTP {status} historical request rejected", status_code=status)
                 return _cached_history(path)
+            elif status == 403 and bool((broker.status_cached() or {}).get("connected")):
+                # A broker-wide authentication failure is handled by broker status. When the
+                # broker is connected and one history symbol/interval is forbidden, repeated
+                # retries only consume history capacity. Quarantine that exact pair briefly.
+                hours=float(settings.get("history_forbidden_quarantine_hours",6.0))
+                quarantine(groww_symbol, interval, "HTTP 403 historical request forbidden while broker connected",
+                           hours=hours, status_code=403)
+                return _cached_history(path)
             else:
                 if exc is not None:
                     health("history", "WARN", f"{symbol} {interval}: {str(exc)[:220]}")
@@ -736,6 +744,11 @@ def history(symbol: str, interval: str="1day", force: bool=False, allow_network:
             if ridx < len(ranges) - 1:
                 continue
             quarantine(groww_symbol, interval, f"HTTP {status} historical request rejected", status_code=status)
+            return _cached_history(path)
+        if status == 403 and bool((broker.status_cached() or {}).get("connected")):
+            hours=float(settings.get("history_forbidden_quarantine_hours",6.0))
+            quarantine(groww_symbol, interval, "HTTP 403 historical request forbidden while broker connected",
+                       hours=hours, status_code=403)
             return _cached_history(path)
         break
     if last_exc is not None:
@@ -1001,11 +1014,16 @@ def warm_intraday_history(max_symbols: int=24) -> Dict[str,Any]:
     for s in active+newly+missing+activity+ready_cached:
         if s not in chosen:chosen.append(s)
         if len(chosen)>=n:break
-    ready=0
-    for sym in chosen:
-        if len(history(sym,"5minute",allow_network=True))>=30:ready+=1
+    ready=0;attempted=0;deferred_rate_limit=0
+    for idx,sym in enumerate(chosen):
+        permit=background_request_allowed()
+        if not permit.get("allowed"):
+            deferred_rate_limit=len(chosen)-idx
+            break
+        attempted+=1
+        if len(history(sym,"5minute",allow_network=True,background=True))>=30:ready+=1
     set_state("intraday_history_warm_cursor",(cursor+rotate_count)%len(syms))
-    out={"attempted":len(chosen),"ready":ready,"cursor":cursor,"universe":len(syms),
+    out={"attempted":attempted,"planned":len(chosen),"ready":ready,"deferred_rate_limit":deferred_rate_limit,"cursor":cursor,"universe":len(syms),
          "priority_active":len(active),"priority_new":len(newly),"priority_movers":len(activity),
          "priority_pool":len(pool),"missing_in_priority_pool":len(missing),"at":now_iso(),
          "policy":"FULL_NSE_BOUNDED_ROTATION_ACTIVE_NEW_CACHED_MOVERS_NO_FULL_CACHE_REPARSE"}
@@ -1029,16 +1047,21 @@ def bootstrap_history(max_symbols: int=80) -> Dict[str,Any]:
             batch.append(s)
         if len(batch)>=min(max_symbols,len(syms)):
             break
-    ok=0;err=0;quarantined=0
-    for s in batch:
+    ok=0;err=0;quarantined=0;attempted=0;deferred_rate_limit=0
+    for idx,s in enumerate(batch):
+        permit=background_request_allowed()
+        if not permit.get("allowed"):
+            deferred_rate_limit=len(batch)-idx
+            break
         meta=instrument(s) or {}; q=quarantine_status(meta.get("groww_symbol") or f"NSE-{s}","1day")
         if q.get("quarantined"):
             quarantined+=1
-        df=history(s,"1day")
+        attempted+=1
+        df=history(s,"1day",background=True)
         if len(df)>=30:ok+=1
         else:err+=1
     set_state("history_bootstrap_cursor",(cursor+max(1,len(rotating[:len(batch)])))%max(1,len(syms)))
-    result={"attempted":len(batch),"ready":ok,"errors":err,"quarantined":quarantined,"cursor":cursor,"priority_live":len(active),"priority_liquid":len(liquid)}
+    result={"attempted":attempted,"planned":len(batch),"ready":ok,"errors":err,"quarantined":quarantined,"deferred_rate_limit":deferred_rate_limit,"cursor":cursor,"priority_live":len(active),"priority_liquid":len(liquid)}
     set_state("last_history_bootstrap",result)
     return result
 
@@ -1117,10 +1140,15 @@ def warm_daily_history(max_symbols: int=24) -> Dict[str,Any]:
     for sym in ordered:
         if sym not in chosen:chosen.append(sym)
         if len(chosen)>=n:break
-    ready=0;errors=0
-    for sym in chosen:
+    ready=0;errors=0;attempted=0;deferred_rate_limit=0
+    for idx,sym in enumerate(chosen):
+        permit=background_request_allowed()
+        if not permit.get("allowed"):
+            deferred_rate_limit=len(chosen)-idx
+            break
+        attempted+=1
         try:
-            if len(history(sym,"1day",allow_network=True))>=30:ready+=1
+            if len(history(sym,"1day",allow_network=True,background=True))>=30:ready+=1
             else:errors+=1
         except Exception:errors+=1
     set_state("daily_history_warm_cursor",(cursor+rotate_count)%len(syms))
@@ -1133,7 +1161,7 @@ def warm_daily_history(max_symbols: int=24) -> Dict[str,Any]:
         cov={"interval":"1day","symbols":len(syms),"ready":None,"minimum_rows":30,
              "sample_symbols":sample.get("symbols"),"sample_ready":sample.get("ready"),
              "mode":"BOUNDED_PRIORITY_SAMPLE_PENDING_FULL_BREADTH","at":now_iso()}
-    out={"attempted":len(chosen),"ready":ready,"errors":errors,"coverage":cov,"universe":len(syms),
+    out={"attempted":attempted,"planned":len(chosen),"ready":ready,"errors":errors,"deferred_rate_limit":deferred_rate_limit,"coverage":cov,"universe":len(syms),
          "priority_pool":len(pool),"missing_in_priority_pool":len(missing),"priority_active":len(active),
          "priority_new":len(newly),"priority_industry_anchors":len(anchor_need),"at":now_iso(),
          "policy":"FULL_NSE_DAILY_BOUNDED_ROTATION_ACTIVE_NEW_NO_FULL_CACHE_REPARSE"}
