@@ -188,7 +188,16 @@ def migrate_morning_freeze_settings(path: Path = SETTINGS_PATH) -> Dict[str, Any
         raw["intraday_scan_size"] = 0
         raw["horizon_scan_size"] = 0
         raw["full_nse_breadth_enabled"] = True
-        changed = weekly_before != 1 or monthly_before != 1 or breadth_before!=(0,0,0) or full_breadth_before is not True
+        history_gap_before=raw.get("history_min_request_interval_seconds")
+        try:
+            history_gap_value=float(history_gap_before) if history_gap_before is not None else float(_DEFAULTS["history_min_request_interval_seconds"])
+        except Exception:
+            history_gap_value=float(_DEFAULTS["history_min_request_interval_seconds"])
+        raw["history_min_request_interval_seconds"]=max(2.0,history_gap_value)
+        changed = (weekly_before != 1 or monthly_before != 1 or breadth_before!=(0,0,0)
+                   or full_breadth_before is not True
+                   or history_gap_before is None
+                   or history_gap_value < 2.0)
         if changed or not path.exists():
             _atomic_write(path, raw)
         return {
@@ -224,6 +233,13 @@ def load_settings() -> Dict[str, Any]:
                     if raw.get("full_nse_breadth_enabled") is not True:
                         raw["full_nse_breadth_enabled"] = True
                         healed = True
+                    try:
+                        history_gap=float(raw.get("history_min_request_interval_seconds",_DEFAULTS["history_min_request_interval_seconds"]))
+                    except Exception:
+                        history_gap=float(_DEFAULTS["history_min_request_interval_seconds"])
+                    if history_gap < 2.0:
+                        raw["history_min_request_interval_seconds"]=2.0
+                        healed = True
                     if healed:
                         _atomic_write(SETTINGS_PATH, raw)
                     for k in _DEFAULTS:
@@ -238,6 +254,10 @@ def load_settings() -> Dict[str, Any]:
         data["intraday_scan_size"] = 0
         data["horizon_scan_size"] = 0
         data["full_nse_breadth_enabled"] = True
+        try:
+            data["history_min_request_interval_seconds"]=max(2.0,float(data.get("history_min_request_interval_seconds",2.0)))
+        except Exception:
+            data["history_min_request_interval_seconds"]=2.0
         return data
 
 
@@ -253,6 +273,9 @@ def update_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
     for cap in ("universe_size","intraday_scan_size","horizon_scan_size"):
         if cap in clean: clean[cap]=0
     if "full_nse_breadth_enabled" in clean: clean["full_nse_breadth_enabled"]=True
+    if "history_min_request_interval_seconds" in clean:
+        try: clean["history_min_request_interval_seconds"]=max(2.0,float(clean["history_min_request_interval_seconds"]))
+        except Exception: clean["history_min_request_interval_seconds"]=2.0
     with _LOCK:
         current = load_settings()
         current.update(clean)
