@@ -12,21 +12,25 @@ NEW_HEALTH="$(mktemp)"
 NEW_GROWW="$(mktemp)"
 PLIST_BACKUP="$(mktemp)"
 HAD_OLD_PLIST=0
-MODE="migration"
+MODE="fresh"
 cleanup(){ rm -f "$TMPSECRET" "$OLD_STATUS" "$NEW_HEALTH" "$NEW_GROWW" "$PLIST_BACKUP" 2>/dev/null || true; }
 trap cleanup EXIT
 
-echo "PS Scanner Quant v6.8.12 safe install / in-place upgrade"
+echo "PS Scanner Quant v6.8.13 production install / recovery / in-place upgrade"
 echo "Target: $APP"
 echo
 
-if [[ ! -d "$APP" ]]; then
-  echo "Previous PS_Scanner_Final not found; refusing install because Groww credential preservation cannot be verified." >&2
-  exit 10
+if [[ -d "$APP" ]]; then
+  MODE="migration"
+  if [[ -f "$APP/psscanner_quant/constants.py" ]] && grep -q 'VERSION = "6\.' "$APP/psscanner_quant/constants.py" 2>/dev/null; then
+    MODE="upgrade"
+  fi
 fi
 
-if [[ -f "$APP/psscanner_quant/constants.py" ]] && grep -q 'VERSION = "6\.' "$APP/psscanner_quant/constants.py" 2>/dev/null; then
-  MODE="upgrade"
+if [[ "$MODE" == "fresh" ]]; then
+  echo "No previous PS_Scanner_Final installation found."
+  echo "Fresh recovery install: application state will initialize cleanly."
+  echo "Groww execution will remain fail-closed until credentials are configured."
 fi
 
 echo "Detected mode: $MODE"
@@ -64,7 +68,7 @@ fi
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 sleep 1
-mv "$APP" "$ROLLBACK"
+if [[ -d "$APP" ]]; then mv "$APP" "$ROLLBACK"; fi
 mkdir -p "$APP"
 
 rollback(){
@@ -172,9 +176,12 @@ try:
 except Exception as exc:
     print("v6.4.3 ledger migration warning:",exc)
 PY2
-else
+elif [[ "$MODE" == "migration" ]]; then
   cp "$TMPSECRET" "$APP/data/secure/groww_credentials.json"
   chmod 600 "$APP/data/secure/groww_credentials.json"
+else
+  echo "Fresh install: no credentials imported."
+  echo "After installation, run CONFIGURE_GROWW.command to configure Groww securely."
 fi
 
 cd "$APP"
@@ -272,7 +279,7 @@ PYH
   sleep 2
 done
 if [[ $ok -ne 1 ]]; then
-  echo "v6.8.12 service did not pass application health check. See $APP/logs/service-error.log" >&2
+  echo "v6.8.13 service did not pass application health check. See $APP/logs/service-error.log" >&2
   exit 20
 fi
 
@@ -303,17 +310,23 @@ PYA
 done
 
 if [[ $groww_ok -ne 1 ]]; then
-  echo "v6.8.12 application started, but Groww connectivity could not be verified after explicit probes." >&2
-  if [[ $groww_auth_required -gt 0 ]]; then
-    echo "Groww returned AUTH_REQUIRED during verification." >&2
+  if [[ "$MODE" == "fresh" ]]; then
+    echo "Fresh install is healthy, but Groww is not configured yet."
+    echo "Research/data workers will initialize; manual execution remains fail-closed."
+    echo "Run $APP/CONFIGURE_GROWW.command after installation."
   else
-    echo "Groww probe never reached CONNECTED; refusing to discard rollback." >&2
+    echo "v6.8.13 application started, but Groww connectivity could not be verified after explicit probes." >&2
+    if [[ $groww_auth_required -gt 0 ]]; then
+      echo "Groww returned AUTH_REQUIRED during verification." >&2
+    else
+      echo "Groww probe never reached CONNECTED; refusing to discard rollback." >&2
+    fi
+    exit 21
   fi
-  exit 21
 fi
 
 curl -fsS --max-time 5 http://127.0.0.1:8765/api/health > "$NEW_HEALTH" 2>/dev/null || true
-python3 - "$NEW_HEALTH" "$NEW_GROWW" "$EXPECTED_VERSION" <<'PYV'
+python3 - "$NEW_HEALTH" "$NEW_GROWW" "$EXPECTED_VERSION" "$MODE" <<'PYV'
 import json,sys
 try:h=json.load(open(sys.argv[1]))
 except Exception:h={}
@@ -323,19 +336,32 @@ expected=sys.argv[3]
 print('New app:', h.get('app'), h.get('version'))
 print('New Groww status:', g.get('status') or 'UNKNOWN')
 print('Credential capabilities:', g.get('credential_capabilities') or {})
-ok=(h.get('version')==expected and h.get('engine_alive') is True and g.get('connected') is True)
+mode=sys.argv[4] if len(sys.argv)>4 else "upgrade"
+ok=(h.get('version')==expected and h.get('engine_alive') is True and (g.get('connected') is True or mode=="fresh"))
 raise SystemExit(0 if ok else 1)
 PYV
+
+echo
+echo "Running post-install production validator..."
+"$APP/.venv/bin/python" "$APP/tools/post_install_validate.py"
 
 rm -rf "$ROLLBACK"
 trap cleanup EXIT
 
 echo
 echo "============================================================"
-echo "PS Scanner Quant v6.8.12 INSTALLED"
+echo "PS Scanner Quant v6.8.13 INSTALLED"
 echo "UI: http://127.0.0.1:8765"
-echo "Groww authentication: VERIFIED"
-echo "v6 runtime data/ledger: PRESERVED"
+if [[ $groww_ok -eq 1 ]]; then
+  echo "Groww authentication: VERIFIED"
+else
+  echo "Groww authentication: NOT CONFIGURED / NOT VERIFIED — execution remains locked"
+fi
+if [[ "$MODE" == "fresh" ]]; then
+  echo "Runtime state: FRESH INITIALIZATION"
+else
+  echo "v6 runtime data/ledger: PRESERVED"
+fi
 echo "Weekly: initial slate frozen by Monday 09:00 IST target; later high-conviction names append only; no replacement"
 echo "Monthly: initial slate frozen by 09:00 IST first NSE trading day; later high-conviction names append only; no hindsight reconstruction"
 echo "Recommendation ownership: initial identities never replaced/deleted; append discoveries are additional immutable identities; every outcome remains learnable"
