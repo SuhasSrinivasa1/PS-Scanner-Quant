@@ -82,7 +82,21 @@ def get_asof(symbol:str, at:datetime) -> Dict[str,Any]:
 def _negative_cached(symbol:str)->bool:
     sym=symbol.upper()
     with _NEGATIVE_LOCK:at=_NEGATIVE_CACHE.get(sym)
-    return bool(at is not None and time.monotonic()-float(at)<=_NEGATIVE_TTL_SECONDS)
+    if at is not None and time.monotonic()-float(at)<=_NEGATIVE_TTL_SECONDS:
+        return True
+    # Persist expected-negative Yahoo support gaps across service restarts.
+    try:
+        with db() as con:
+            row=con.execute("SELECT asof,source FROM fundamentals_cache WHERE symbol=?",(sym,)).fetchone()
+        if row and str(row[1] or "")=="YAHOO_UNSUPPORTED_NEGATIVE_CACHE":
+            asof=datetime.fromisoformat(str(row[0]))
+            if asof.tzinfo is None:asof=asof.astimezone()
+            if (datetime.now(asof.tzinfo)-asof).total_seconds()<=_NEGATIVE_TTL_SECONDS:
+                with _NEGATIVE_LOCK:_NEGATIVE_CACHE[sym]=time.monotonic()
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def refresh(symbol: str) -> Dict[str,Any]:
