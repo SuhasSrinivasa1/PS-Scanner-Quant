@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -21,6 +22,7 @@ _STATUS_PATH=_EXPORT_DIR/"status.json"
 _LOCK=threading.RLock()
 _PAYLOAD:bytes|None=None
 _MIN_REFRESH_AGE_SECONDS=1800.0
+_MIN_FREE_DISK_BYTES=1024*1024*1024
 _STATUS:Dict[str,Any]={"ready":False,"path":str(_LATEST_PATH),"generated_at":None,"last_error":"not yet built","elapsed_ms":None,
                        "payload_ready":False,"request_path_filesystem_reads":0,"min_refresh_age_seconds":_MIN_REFRESH_AGE_SECONDS}
 
@@ -179,6 +181,25 @@ def refresh_support_bundle(*,force:bool=False,min_age_seconds:float=_MIN_REFRESH
                                 "request_path_filesystem_reads":0,
                                 "min_refresh_age_seconds":max(60.0,float(min_age_seconds)),
                                 "refresh_skipped_fresh":True})
+            return support_bundle_status()
+        tmp=_LATEST_PATH.with_suffix(".tmp.zip")
+        try:
+            if tmp.exists():tmp.unlink()
+        except Exception:pass
+        existing_size=int(_LATEST_PATH.stat().st_size) if _LATEST_PATH.exists() else 0
+        free=int(shutil.disk_usage(_EXPORT_DIR if _EXPORT_DIR.exists() else DATA).free)
+        required=max(_MIN_FREE_DISK_BYTES,existing_size*3)
+        if free<required:
+            if _PAYLOAD is None and _LATEST_PATH.exists():
+                try:
+                    payload=_load_payload(_LATEST_PATH)
+                    with _LOCK:_PAYLOAD=payload
+                except Exception:pass
+            with _LOCK:
+                _STATUS.update({"last_error":"INSUFFICIENT_FREE_DISK_FOR_SUPPORT_REFRESH","refresh_skipped_low_disk":True,
+                                "free_disk_bytes":free,"required_free_disk_bytes":required,"payload_ready":_PAYLOAD is not None,
+                                "payload_bytes":len(_PAYLOAD) if _PAYLOAD is not None else 0,
+                                "request_path_filesystem_reads":0})
             return support_bundle_status()
         out=_build_to_path(_LATEST_PATH)
         payload=_load_payload(_LATEST_PATH)
