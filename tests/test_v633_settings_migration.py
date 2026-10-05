@@ -19,6 +19,7 @@ class V633SettingsMigrationTests(unittest.TestCase):
                 "monthly_min_observations": 4,
                 "expected_static_ip": "169.150.209.215",
                 "manual_execution_enabled": False,
+                "history_min_request_interval_seconds": 1.25,
                 "unknown_future_key": "preserve-me",
             }))
             result = migrate_morning_freeze_settings(p)
@@ -30,12 +31,13 @@ class V633SettingsMigrationTests(unittest.TestCase):
             self.assertEqual(data["monthly_min_observations"], 1)
             self.assertEqual(data["expected_static_ip"], "169.150.209.215")
             self.assertFalse(data["manual_execution_enabled"])
+            self.assertEqual(data["history_min_request_interval_seconds"], 2.0)
             self.assertEqual(data["unknown_future_key"], "preserve-me")
 
     def test_migration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "settings.json"
-            p.write_text(json.dumps({"weekly_min_observations": 1, "monthly_min_observations": 1, "universe_size": 0, "intraday_scan_size": 0, "horizon_scan_size": 0, "full_nse_breadth_enabled": True}))
+            p.write_text(json.dumps({"weekly_min_observations": 1, "monthly_min_observations": 1, "universe_size": 0, "intraday_scan_size": 0, "horizon_scan_size": 0, "full_nse_breadth_enabled": True, "history_min_request_interval_seconds": 2.0}))
             result = migrate_morning_freeze_settings(p)
             self.assertFalse(result["changed"])
             data = json.loads(p.read_text())
@@ -45,6 +47,24 @@ class V633SettingsMigrationTests(unittest.TestCase):
             self.assertEqual(data["intraday_scan_size"], 0)
             self.assertEqual(data["horizon_scan_size"], 0)
             self.assertTrue(data["full_nse_breadth_enabled"])
+            self.assertEqual(data["history_min_request_interval_seconds"], 2.0)
+
+    def test_more_conservative_history_spacing_is_preserved(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "settings.json"
+            p.write_text(json.dumps({
+                "weekly_min_observations": 1,
+                "monthly_min_observations": 1,
+                "universe_size": 0,
+                "intraday_scan_size": 0,
+                "horizon_scan_size": 0,
+                "full_nse_breadth_enabled": True,
+                "history_min_request_interval_seconds": 3.5,
+            }))
+            result = migrate_morning_freeze_settings(p)
+            self.assertFalse(result["changed"])
+            data = json.loads(p.read_text())
+            self.assertEqual(data["history_min_request_interval_seconds"], 3.5)
 
 
 if __name__ == "__main__":
