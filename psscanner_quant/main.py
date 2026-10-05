@@ -28,7 +28,7 @@ from .trading_calendar import status as trading_calendar_status, is_regular_trad
 from .sector_context import status as sector_status, status_cached as sector_status_cached
 from .event_calendar import status as event_calendar_status
 from .history_control import status as history_control_status, status_cached as history_control_status_cached
-from .execution_integrity import execution_analytics, reconcile_positions, cached_position_reconciliation
+from .execution_integrity import execution_analytics, reconcile_positions, cached_position_reconciliation, acknowledge_external_position_baseline
 from .production_integrity import (
     no_trade_diagnostics, replay_decisions, backup_status, backup_database,
     experiments as experiment_rows, register_experiment,
@@ -41,6 +41,7 @@ from .health_snapshot import status as health_db_snapshot_status, refresh as ref
 from .support_bundle import prime_support_bundle, latest_support_bundle_payload, support_bundle_status
 from .passive_views import prime as prime_passive_views, cached_performance, cached_international, status as passive_view_status
 from .evidence_policy import profiles as evidence_profiles
+from .build_info import build_commit
 
 app=FastAPI(title=APP_NAME,version=VERSION)
 
@@ -62,6 +63,9 @@ class GrowwTotpConfig(BaseModel):
     totp_token: str
     totp_secret: str
 
+class ExternalPositionBaselineConfirm(BaseModel):
+    confirm: str
+
 @app.on_event("startup")
 def _startup():
     init_db();seed_library();prime_algorithm_cache();prime_passive_views();prime_support_bundle();refresh_health_db_snapshot();engine.start()
@@ -74,7 +78,7 @@ def index():return FileResponse(STATIC/"index.html")
 
 @app.get("/api/ping")
 def ping():
-    return {"ok": True, "app": APP_NAME, "version": VERSION, "at": now_iso()}
+    return {"ok": True, "app": APP_NAME, "version": VERSION, "build_commit": build_commit(), "at": now_iso()}
 
 def _cached_states(keys, timeout_seconds:float=.25):
     """Read several system_state keys in one bounded WAL snapshot."""
@@ -210,7 +214,7 @@ def health():
         "history_control":history_cached,
         "nse_universe":_cached_universe_health(state),
     }
-    return {"app":APP_NAME,"version":VERSION,
+    return {"app":APP_NAME,"version":VERSION,"build_commit":build_commit(),
         "architecture_patch":{"version":"6.8.0","name":"SHARED_EVIDENCE_FABRIC_AND_ADAPTIVE_TRADING_ALGORITHM",
             "current_period_ui":True,"history_performance_api":True,"family_diversity_advisory":True,
             "database_horizon_exclusivity_trigger":True,"late_horizon_recovery":True,"worker_hung_telemetry":True,
@@ -635,6 +639,21 @@ def orders_reconcile():
 @app.post("/api/execution/positions/reconcile")
 def positions_reconcile():
     return reconcile_positions()
+
+@app.post("/api/execution/positions/acknowledge-external-baseline")
+def positions_acknowledge_external_baseline(payload: ExternalPositionBaselineConfirm, request: Request):
+    """Local-only, explicit disaster-recovery acknowledgement of external CNC exposure.
+
+    This never imports/fabricates PS Scanner orders. The baseline expires with the trading
+    day and any later broker quantity change becomes a hard mismatch again.
+    """
+    host=str(request.client.host if request.client else "")
+    if host not in ("127.0.0.1","::1","localhost"):
+        raise HTTPException(403,"External-position recovery acknowledgement is available only from localhost.")
+    try:
+        return acknowledge_external_position_baseline(payload.confirm)
+    except Exception as exc:
+        raise HTTPException(409,str(exc)[:300])
 
 @app.get("/api/evidence/status")
 def evidence_status():
