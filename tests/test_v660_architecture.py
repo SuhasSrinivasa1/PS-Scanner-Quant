@@ -37,7 +37,7 @@ class V660ArchitectureTests(unittest.TestCase):
             )
 
     def test_version_and_central_lifecycle_contract(self):
-        self.assertEqual(VERSION,"6.8.12")
+        self.assertEqual(VERSION,"6.8.13")
         payload=lifecycle.lifecycle_payload()
         self.assertEqual(payload["policy_version"],"V680_SHARED_EVIDENCE_FABRIC_ADAPTIVE_ALGORITHM")
         self.assertIn("PERFORMANCE",payload["pages"])
