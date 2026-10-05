@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
+import time
+from threading import RLock
 
 from .constants import IST
 from .db import db, health, now_iso, set_state
@@ -10,19 +12,49 @@ from .db import db, health, now_iso, set_state
 POSITIVE = {'beats','beat','surge','wins','order','contract','approval','approved','growth','upgrade','raises','record','profit','launch','expands','acquisition','buyback','dividend'}
 NEGATIVE = {'misses','miss','falls','drop','fraud','probe','investigation','downgrade','cuts','loss','default','lawsuit','penalty','recall','warning','pledge','dilution'}
 BINARY = {'earnings','results','merger','acquisition','court','regulator','approval','fda','board','guidance','offer','buyback'}
+_MEM_CACHE:Dict[str,Dict[str,Any]]={}
+_MEM_LOCK=RLock()
+
+
+def prime_cache(symbols, ttl_minutes:int=30)->Dict[str,Dict[str,Any]]:
+    """Load cached news for a scanner batch with bounded SQLite reads."""
+    syms=[]
+    for raw in symbols or []:
+        s=str(raw or "").upper()
+        if s and s not in syms:syms.append(s)
+    if not syms:return {}
+    cutoff=datetime.now(IST)-timedelta(minutes=ttl_minutes);out={}
+    try:
+        for pos in range(0,len(syms),800):
+            chunk=syms[pos:pos+800];marks=",".join("?" for _ in chunk)
+            with db(timeout_seconds=.35) as con:
+                rows=con.execute(f"SELECT symbol,asof,payload_json FROM news_cache WHERE symbol IN ({marks})",tuple(chunk)).fetchall()
+            for r in rows:
+                try:
+                    ts=datetime.fromisoformat(r['asof']);ts=ts if ts.tzinfo else ts.replace(tzinfo=IST)
+                    if ts<cutoff:continue
+                    out[str(r['symbol']).upper()]=json.loads(r['payload_json'] or '{}')
+                except Exception:continue
+    except Exception:pass
+    with _MEM_LOCK:
+        for s in syms:_MEM_CACHE[s]={"loaded_at":time.monotonic(),"payload":dict(out.get(s) or {})}
+    return {s:dict(out.get(s) or {}) for s in syms}
 
 
 def _cached(symbol:str, ttl_minutes:int=30)->Dict[str,Any]:
-    with db() as con:
-        r=con.execute('SELECT asof,payload_json FROM news_cache WHERE symbol=?',(symbol.upper(),)).fetchone()
+    sym=symbol.upper()
+    with _MEM_LOCK:mem=dict(_MEM_CACHE.get(sym) or {})
+    if mem and time.monotonic()-float(mem.get("loaded_at") or 0)<=min(60.0,max(5.0,ttl_minutes*60.0)):
+        return dict(mem.get("payload") or {})
+    with db() as con:r=con.execute('SELECT asof,payload_json FROM news_cache WHERE symbol=?',(sym,)).fetchone()
     if not r:return {}
     try:
-        ts=datetime.fromisoformat(r['asof'])
-        if ts.tzinfo is None:ts=ts.replace(tzinfo=IST)
+        ts=datetime.fromisoformat(r['asof']);ts=ts if ts.tzinfo else ts.replace(tzinfo=IST)
         if datetime.now(IST)-ts>timedelta(minutes=ttl_minutes):return {}
-        return json.loads(r['payload_json'] or '{}')
+        payload=json.loads(r['payload_json'] or '{}')
+        with _MEM_LOCK:_MEM_CACHE[sym]={"loaded_at":time.monotonic(),"payload":dict(payload)}
+        return payload
     except Exception:return {}
-
 
 def context(symbol:str, allow_refresh:bool=False)->Dict[str,Any]:
     c=_cached(symbol)
