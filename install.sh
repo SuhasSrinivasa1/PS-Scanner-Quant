@@ -90,6 +90,7 @@ trap 'rc=$?; if [[ $rc -ne 0 ]]; then rollback; fi; cleanup; exit $rc' EXIT
 # Install code only. Runtime state is restored below, never seeded over existing v6 state.
 rsync -a --delete --exclude '.venv' --exclude '__pycache__' --exclude '*.pyc' --exclude 'data' --exclude 'logs' "$SRC/" "$APP/"
 mkdir -p "$APP/data/secure" "$APP/logs"
+chmod +x "$APP/run.sh" "$APP/install.sh" "$APP/CONFIGURE_GROWW.command" 2>/dev/null || true
 
 if [[ "$MODE" == "upgrade" ]]; then
   if [[ -d "$ROLLBACK/data" ]]; then rsync -a "$ROLLBACK/data/" "$APP/data/"; fi
