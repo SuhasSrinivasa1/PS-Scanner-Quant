@@ -175,51 +175,138 @@ def record_scan_run(book: str, stats: Dict[str,Any]) -> str:
 
 
 def no_trade_diagnostics(book: Optional[str] = None, limit: int = 12) -> Dict[str,Any]:
-    books=[str(book).upper()] if book else ["INTRADAY","WEEKLY","MONTHLY","ETF","CIRCUIT","CIRCUIT_NEXTDAY","INTERNATIONAL"]
+    # Passive/bounded contract: one short SQLite snapshot and no network work.
+    books=[str(book).upper()] if book else [
+        "INTRADAY","WEEKLY","MONTHLY","ETF",
+        "CIRCUIT","CIRCUIT_NEXTDAY","INTERNATIONAL"
+    ]
+    lim=max(1,min(50,int(limit or 12)))
+    state={}
+    decision_rows={b:[] for b in books}
+    degraded_reason=None
+
+    try:
+        keys=[]
+        for b in books:
+            keys.extend(("scan_status_"+b,"scan_detail_"+b))
+
+        marks=",".join("?" for _ in keys)
+        row_limit=max(20,min(500,lim*20))
+
+        # ONE SQLite connection replaces:
+        #   2 get_state() DB opens per book
+        #   + 1 trade_decisions DB open per book.
+        # The 250ms busy timeout prevents passive HTTP from hanging.
+        with db(timeout_seconds=.25) as con:
+            rows=con.execute(
+                f"SELECT key,value_json "
+                f"FROM system_state "
+                f"WHERE key IN ({marks})",
+                tuple(keys),
+            ).fetchall()
+
+            state={
+                str(r["key"]):_json(r["value_json"],{})
+                for r in rows
+            }
+
+            for b in books:
+                decision_rows[b]=con.execute(
+                    "SELECT decision,payload_json "
+                    "FROM trade_decisions "
+                    "WHERE book=? "
+                    "ORDER BY id DESC "
+                    "LIMIT ?",
+                    (b,row_limit),
+                ).fetchall()
+
+    except Exception as exc:
+        degraded_reason=f"{type(exc).__name__}: {exc}"[:200]
+        decision_rows={b:[] for b in books}
+
     out={}
+
     for b in books:
-        status=get_state("scan_status_"+b,{}) or {};detail=get_state("scan_detail_"+b,{}) or {}
+        status=state.get("scan_status_"+b,{}) or {}
+        detail=state.get("scan_detail_"+b,{}) or {}
         funnel=dict(detail.get("funnel") or {})
+
         blockers=Counter()
         decisions=[]
-        try:
-            with db() as con:
-                rows=con.execute(
-                    "SELECT decision,payload_json FROM trade_decisions WHERE book=? ORDER BY id DESC LIMIT ?",
-                    (b,max(20,min(500,int(limit)*20))),
-                ).fetchall()
-            for row in rows:
-                payload=_json(row["payload_json"],{})
-                ti=payload.get("trade_intelligence") or {}
-                for reason in ti.get("hard_blockers") or []:
-                    blockers[str(reason)]+=1
-                if len(decisions)<limit:
-                    decisions.append({
-                        "symbol":payload.get("symbol"),"side":payload.get("side"),"decision":row["decision"],
-                        "pipeline_stage":payload.get("pipeline_stage"),
-                        "pipeline_verdict":payload.get("pipeline_verdict"),
-                        "rejection_code":payload.get("rejection_code"),
-                    })
-        except Exception:
-            pass
-        coverage={
-            "universe_total":funnel.get("universe_total") or detail.get("full_nse_universe") or detail.get("universe"),
-            "scan_scope_total":funnel.get("scan_scope_total") or detail.get("universe"),
-            "processed":funnel.get("scan_scope_processed") or detail.get("processed"),
-            "full_universe_scan":funnel.get("full_universe_scan"),
-        }
-        classification=status.get("availability_class") or status.get("availability_reason") or status.get("status")
-        out[b]={
-            "classification":classification,"coverage":coverage,"funnel":funnel,
-            "near_misses":(detail.get("near_misses") or [])[:limit],
-            "top_hard_blockers":[{"reason":k,"count":v} for k,v in blockers.most_common(limit)],
-            "recent_candidate_decisions":decisions,
-            "search_evidence":status.get("search_evidence") or (status.get("bootstrap_recovery") or {}).get("pass_summary"),
-            "contract":status.get("contract"),
-            "principle":"NO_OPPORTUNITY is distinct from SEARCH_INCOMPLETE, DATA_NOT_READY and SOFTWARE_OR_EXECUTION_BOTTLENECK.",
-        }
-    return {"generated_at":now_iso(),"books":out,"policy":"V670_FIRST_CLASS_NO_TRADE_DIAGNOSTICS"}
 
+        for row in decision_rows.get(b,[]):
+            payload=_json(row["payload_json"],{})
+            ti=payload.get("trade_intelligence") or {}
+
+            for reason in ti.get("hard_blockers") or []:
+                blockers[str(reason)]+=1
+
+            if len(decisions)<lim:
+                decisions.append({
+                    "symbol":payload.get("symbol"),
+                    "side":payload.get("side"),
+                    "decision":row["decision"],
+                    "pipeline_stage":payload.get("pipeline_stage"),
+                    "pipeline_verdict":payload.get("pipeline_verdict"),
+                    "rejection_code":payload.get("rejection_code"),
+                })
+
+        coverage={
+            "universe_total":
+                funnel.get("universe_total")
+                or detail.get("full_nse_universe")
+                or detail.get("universe"),
+
+            "scan_scope_total":
+                funnel.get("scan_scope_total")
+                or detail.get("universe"),
+
+            "processed":
+                funnel.get("scan_scope_processed")
+                or detail.get("processed"),
+
+            "full_universe_scan":
+                funnel.get("full_universe_scan"),
+        }
+
+        classification=(
+            status.get("availability_class")
+            or status.get("availability_reason")
+            or status.get("status")
+        )
+
+        out[b]={
+            "classification":classification,
+            "coverage":coverage,
+            "funnel":funnel,
+            "near_misses":(detail.get("near_misses") or [])[:lim],
+            "top_hard_blockers":[
+                {"reason":k,"count":v}
+                for k,v in blockers.most_common(lim)
+            ],
+            "recent_candidate_decisions":decisions,
+            "search_evidence":
+                status.get("search_evidence")
+                or (status.get("bootstrap_recovery") or {}).get("pass_summary"),
+            "contract":status.get("contract"),
+            "principle":
+                "NO_OPPORTUNITY is distinct from SEARCH_INCOMPLETE, "
+                "DATA_NOT_READY and SOFTWARE_OR_EXECUTION_BOTTLENECK.",
+        }
+
+    return {
+        "generated_at":now_iso(),
+        "books":out,
+        "policy":"V670_FIRST_CLASS_NO_TRADE_DIAGNOSTICS",
+        "diagnostics_contract":{
+            "passive_bounded":True,
+            "network_calls":False,
+            "db_connections":1,
+            "db_timeout_seconds":0.25,
+            "complete":degraded_reason is None,
+            "degraded_reason":degraded_reason,
+        },
+    }
 
 def _replay_verdict(payload: Dict[str,Any]) -> Dict[str,Any]:
     strategies=payload.get("strategies") or []
