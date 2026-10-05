@@ -115,15 +115,16 @@ if [[ "$MODE" == "upgrade" || "$MODE" == "recovery" ]]; then
   if [[ -d "$ROLLBACK/data" ]]; then rsync -a "$ROLLBACK/data/" "$APP/data/"; fi
   if [[ -d "$ROLLBACK/logs" ]]; then rsync -a "$ROLLBACK/logs/" "$APP/logs/"; fi
   echo "Preserved surviving v6 data, settings, ledger files and logs."
+fi
 
-  # Recovery must establish a valid current schema BEFORE any state reader, ledger
-  # migration, regression test, cache primer or service process touches the database.
-  # A readable but incomplete SQLite file is repaired additively in place. A genuinely
-  # corrupt database is retained under a forensic filename and replaced with a clean
-  # active database; it is never silently discarded.
-  (
-    cd "$APP"
-    PYTHONPATH="$APP" python3 - "$MODE" <<'PYDBREC'
+# Recovery must establish a valid current schema BEFORE any state reader, ledger
+# migration, regression test, cache primer or service process touches the database.
+# A readable but incomplete SQLite file is repaired additively in place. A genuinely
+# corrupt database is retained under a forensic filename and replaced with a clean
+# active database; it is never silently discarded.
+(
+  cd "$APP"
+  PYTHONPATH="$APP" python3 - "$MODE" <<'PYDBREC'
 import os
 import sqlite3
 import sys
@@ -137,33 +138,33 @@ p=Path(dbmod.DB_PATH)
 p.parent.mkdir(parents=True,exist_ok=True)
 
 def quarantine_corrupt(reason: str) -> None:
-    stamp=time.strftime("%Y%m%d_%H%M%S")
-    forensic=p.with_name(p.name + ".damaged_recovery_" + stamp)
-    if p.exists():
-        os.replace(p,forensic)
-    for suffix in ("-wal","-shm"):
-        side=Path(str(p)+suffix)
-        if side.exists():
-            os.replace(side,Path(str(forensic)+suffix))
-    print("Recovery database quarantine:", forensic.name, "reason:", reason[:180])
+  stamp=time.strftime("%Y%m%d_%H%M%S")
+  forensic=p.with_name(p.name + ".damaged_recovery_" + stamp)
+  if p.exists():
+      os.replace(p,forensic)
+  for suffix in ("-wal","-shm"):
+      side=Path(str(p)+suffix)
+      if side.exists():
+          os.replace(side,Path(str(forensic)+suffix))
+  print("Recovery database quarantine:", forensic.name, "reason:", reason[:180])
 
 if p.exists() and p.stat().st_size:
-    try:
-        con=sqlite3.connect(str(p))
-        row=con.execute("PRAGMA quick_check").fetchone()
-        con.close()
-        if not row or str(row[0]).lower()!="ok":
-            raise sqlite3.DatabaseError("quick_check=" + repr(row))
-    except sqlite3.DatabaseError as exc:
-        if mode!="recovery":
-            raise
-        quarantine_corrupt(str(exc))
+  try:
+      con=sqlite3.connect(str(p))
+      row=con.execute("PRAGMA quick_check").fetchone()
+      con.close()
+      if not row or str(row[0]).lower()!="ok":
+          raise sqlite3.DatabaseError("quick_check=" + repr(row))
+  except sqlite3.DatabaseError as exc:
+      if mode!="recovery":
+          raise
+      quarantine_corrupt(str(exc))
 
 dbmod.init_db()
 
 required={
-    "system_state","recommendations","trade_decisions","scan_runs",
-    "strategy_validation_runs","algorithm_versions","institutional_snapshots",
+  "system_state","recommendations","trade_decisions","scan_runs",
+  "strategy_validation_runs","algorithm_versions","institutional_snapshots",
 }
 con=sqlite3.connect(str(p))
 tables={r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -171,13 +172,14 @@ qc=con.execute("PRAGMA quick_check").fetchone()
 con.close()
 missing=sorted(required-tables)
 if missing:
-    raise SystemExit("Database schema initialization missing tables: " + ",".join(missing))
+  raise SystemExit("Database schema initialization missing tables: " + ",".join(missing))
 if not qc or str(qc[0]).lower()!="ok":
-    raise SystemExit("Database quick_check failed after schema initialization: " + repr(qc))
+  raise SystemExit("Database quick_check failed after schema initialization: " + repr(qc))
 print("Recovery database schema: READY; required tables present; quick_check=ok")
 PYDBREC
-  )
+)
 
+if [[ "$MODE" == "upgrade" || "$MODE" == "recovery" ]]; then
   # v6.4.3 settings migration: v6.3.2 changed the default observation gate to 1,
   # but preserved settings.json from older installs can still contain 6/4. Apply the
   # new morning-freeze contract before the regression suite runs. No other setting is touched.
