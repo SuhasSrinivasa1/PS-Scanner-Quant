@@ -93,11 +93,12 @@ _DEFAULTS: Dict[str, Any] = {
     "global_india_max_per_side": 5,
     # v6.2.1 reliability: central Groww historical-data pacing and adaptive backoff.
     # These defaults are deliberately conservative; the system slows itself further after HTTP 429.
-    "history_min_request_interval_seconds": 1.25,
+    "history_min_request_interval_seconds": 2.0,
     "history_429_backoff_base_seconds": 5.0,
     "history_429_backoff_max_seconds": 60.0,
     "history_429_max_retries": 3,
     "history_invalid_symbol_quarantine_hours": 12.0,
+    "history_forbidden_quarantine_hours": 6.0,
     # v6.2.3: Groww /v1/historical/candles enforces per-request window limits.
     # Daily history is fetched in <=175-day chunks (below the documented 180-day maximum)
     # and merged locally. Two chunks provide enough bars for SMA200 without oversized requests.
