@@ -12,7 +12,7 @@ NEW_HEALTH="$(mktemp)"
 NEW_GROWW="$(mktemp)"
 PLIST_BACKUP="$(mktemp)"
 HAD_OLD_PLIST=0
-MODE="migration"
+MODE="fresh_recovery"
 cleanup(){ rm -f "$TMPSECRET" "$OLD_STATUS" "$NEW_HEALTH" "$NEW_GROWW" "$PLIST_BACKUP" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -20,13 +20,11 @@ echo "PS Scanner Quant v6.8.12 safe install / in-place upgrade"
 echo "Target: $APP"
 echo
 
-if [[ ! -d "$APP" ]]; then
-  echo "Previous PS_Scanner_Final not found; refusing install because Groww credential preservation cannot be verified." >&2
-  exit 10
-fi
-
-if [[ -f "$APP/psscanner_quant/constants.py" ]] && grep -q 'VERSION = "6\.' "$APP/psscanner_quant/constants.py" 2>/dev/null; then
-  MODE="upgrade"
+if [[ -d "$APP" ]]; then
+  MODE="migration"
+  if [[ -f "$APP/psscanner_quant/constants.py" ]] && grep -q 'VERSION = "6\.' "$APP/psscanner_quant/constants.py" 2>/dev/null; then
+    MODE="upgrade"
+  fi
 fi
 
 echo "Detected mode: $MODE"
@@ -64,7 +62,7 @@ fi
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 sleep 1
-mv "$APP" "$ROLLBACK"
+if [[ -d "$APP" ]]; then mv "$APP" "$ROLLBACK"; fi
 mkdir -p "$APP"
 
 rollback(){
@@ -172,9 +170,12 @@ try:
 except Exception as exc:
     print("v6.4.3 ledger migration warning:",exc)
 PY2
-else
+elif [[ "$MODE" == "migration" ]]; then
   cp "$TMPSECRET" "$APP/data/secure/groww_credentials.json"
   chmod 600 "$APP/data/secure/groww_credentials.json"
+else
+  echo "Fresh recovery install: no Groww credentials were reconstructed or invented."
+  echo "Research runtime will install normally; execution remains unavailable until Groww is reconfigured."
 fi
 
 cd "$APP"
@@ -205,6 +206,21 @@ rm -rf .venv
 "$RUNTIME_PYTHON" -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip setuptools wheel
 ./.venv/bin/pip install -r requirements.txt
+if [[ "$MODE" == "fresh_recovery" ]]; then
+  ./.venv/bin/python - <<'PYFRESH'
+from psscanner_quant.db import init_db
+from psscanner_quant.config import update_settings
+from psscanner_quant.strategy_library import seed_library
+from psscanner_quant.event_calendar import seed_official_calendar
+from psscanner_quant.production_integrity import seed_release_experiment
+init_db()
+update_settings({})
+seed_library()
+seed_official_calendar()
+seed_release_experiment()
+print("Fresh recovery runtime initialized: empty ledger/schema + default settings + seed strategy/event metadata")
+PYFRESH
+fi
 ./.venv/bin/python -m compileall -q psscanner_quant
 ./.venv/bin/python -m unittest discover -s tests -v
 ./.venv/bin/python - <<'PYHS'
@@ -303,27 +319,36 @@ PYA
 done
 
 if [[ $groww_ok -ne 1 ]]; then
-  echo "v6.8.12 application started, but Groww connectivity could not be verified after explicit probes." >&2
-  if [[ $groww_auth_required -gt 0 ]]; then
-    echo "Groww returned AUTH_REQUIRED during verification." >&2
+  if [[ "$MODE" == "fresh_recovery" ]]; then
+    echo "Fresh recovery install: Groww is not connected yet; continuing because research installation must remain independent of execution readiness."
+    if [[ $groww_auth_required -gt 0 ]]; then
+      echo "Groww returned AUTH_REQUIRED as expected for a fresh recovery install without credentials."
+    fi
   else
-    echo "Groww probe never reached CONNECTED; refusing to discard rollback." >&2
+    echo "v6.8.12 application started, but Groww connectivity could not be verified after explicit probes." >&2
+    if [[ $groww_auth_required -gt 0 ]]; then
+      echo "Groww returned AUTH_REQUIRED during verification." >&2
+    else
+      echo "Groww probe never reached CONNECTED; refusing to discard rollback." >&2
+    fi
+    exit 21
   fi
-  exit 21
 fi
 
 curl -fsS --max-time 5 http://127.0.0.1:8765/api/health > "$NEW_HEALTH" 2>/dev/null || true
-python3 - "$NEW_HEALTH" "$NEW_GROWW" "$EXPECTED_VERSION" <<'PYV'
+python3 - "$NEW_HEALTH" "$NEW_GROWW" "$EXPECTED_VERSION" "$MODE" <<'PYV'
 import json,sys
 try:h=json.load(open(sys.argv[1]))
 except Exception:h={}
 try:g=json.load(open(sys.argv[2]))
 except Exception:g={}
-expected=sys.argv[3]
+expected=sys.argv[3];mode=sys.argv[4]
 print('New app:', h.get('app'), h.get('version'))
 print('New Groww status:', g.get('status') or 'UNKNOWN')
 print('Credential capabilities:', g.get('credential_capabilities') or {})
-ok=(h.get('version')==expected and h.get('engine_alive') is True and g.get('connected') is True)
+health_ok=(h.get('version')==expected and h.get('engine_alive') is True)
+execution_ok=(g.get('connected') is True) if mode!='fresh_recovery' else True
+ok=health_ok and execution_ok
 raise SystemExit(0 if ok else 1)
 PYV
 
@@ -334,8 +359,13 @@ echo
 echo "============================================================"
 echo "PS Scanner Quant v6.8.12 INSTALLED"
 echo "UI: http://127.0.0.1:8765"
-echo "Groww authentication: VERIFIED"
-echo "v6 runtime data/ledger: PRESERVED"
+if [[ "$MODE" == "fresh_recovery" ]]; then
+  echo "Groww authentication: NOT CONFIGURED — execution remains blocked until credentials are reconfigured"
+  echo "v6 runtime data/ledger: NEW EMPTY RUNTIME — recoverable audit/learning ledger must be restored separately"
+else
+  echo "Groww authentication: VERIFIED"
+  echo "v6 runtime data/ledger: PRESERVED"
+fi
 echo "Weekly: initial slate frozen by Monday 09:00 IST target; later high-conviction names append only; no replacement"
 echo "Monthly: initial slate frozen by 09:00 IST first NSE trading day; later high-conviction names append only; no hindsight reconstruction"
 echo "Recommendation ownership: initial identities never replaced/deleted; append discoveries are additional immutable identities; every outcome remains learnable"
