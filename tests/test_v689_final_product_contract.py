@@ -7,7 +7,7 @@ from psscanner_quant import main, engine, data, support_bundle, evidence_policy,
 
 class V689FinalProductContractTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.12")
+        self.assertEqual(VERSION, "6.8.13")
 
     def test_passive_health_has_no_request_path_database(self):
         src=inspect.getsource(main.health)
