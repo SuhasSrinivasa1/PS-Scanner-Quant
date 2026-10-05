@@ -132,6 +132,37 @@ def clear_quarantine(groww_symbol: str, interval: str) -> None:
             q.pop(key, None); state["quarantine"] = q; _save_state(state)
 
 
+def _effective_min_gap(settings: Optional[Dict[str, Any]] = None) -> float:
+    """Adaptive inter-request gap after observed 429 pressure.
+
+    A single success should not immediately restore the fastest cadence after a burst of
+    throttling. The streak decays one successful request at a time, so background recovery
+    converges back to the configured base rate without oscillating into repeated 429s.
+    """
+    settings = settings or load_settings()
+    base = max(0.25, float(settings.get("history_min_request_interval_seconds", 2.0)))
+    pressure = min(5, max(0, int(_CONSECUTIVE_429)))
+    return min(15.0, base * (1.0 + 0.50 * pressure))
+
+
+def background_request_allowed() -> Dict[str, Any]:
+    """Non-blocking permit for cache-warm workers.
+
+    Background hydration must never sit inside a 60-second provider cooldown and then
+    immediately consume an entire worker batch. It yields the worker instead; the next
+    scheduled pass becomes the single recovery probe after cooldown.
+    """
+    now = time.time()
+    remaining = max(0.0, _GLOBAL_COOLDOWN_UNTIL - now)
+    return {
+        "allowed": remaining <= 0.0,
+        "cooldown_remaining_seconds": round(remaining, 2),
+        "consecutive_429": int(_CONSECUTIVE_429),
+        "effective_min_request_interval_seconds": round(_effective_min_gap(), 3),
+        "policy": "BACKGROUND_HISTORY_YIELDS_DURING_PROVIDER_COOLDOWN",
+    }
+
+
 def wait_for_slot() -> float:
     """Serialize Groww historical requests and enforce global adaptive cooldown.
 
@@ -141,7 +172,7 @@ def wait_for_slot() -> float:
     """
     global _LAST_REQUEST_MONO
     settings = load_settings()
-    min_gap = max(0.25, float(settings.get("history_min_request_interval_seconds", 1.25)))
+    min_gap = _effective_min_gap(settings)
     with _LOCK:
         now_wall = time.time(); now_mono = time.monotonic()
         wait = max(0.0, _GLOBAL_COOLDOWN_UNTIL - now_wall, min_gap - (now_mono - _LAST_REQUEST_MONO))
@@ -197,6 +228,8 @@ def status_cached() -> Dict[str, Any]:
             "status":"PACER_BUSY_NONBLOCKING_SNAPSHOT",
             "pacer_busy":True,
             "global_cooldown_remaining_seconds":round(max(0.0,_GLOBAL_COOLDOWN_UNTIL-time.time()),2),
+            "effective_min_request_interval_seconds":round(_effective_min_gap(),3),
+            "background_request_allowed":max(0.0,_GLOBAL_COOLDOWN_UNTIL-time.time())<=0.0,
             "consecutive_429":int(_CONSECUTIVE_429),
             "nonblocking":True,
         }
@@ -229,7 +262,9 @@ def status() -> Dict[str, Any]:
         cooldown = max(0.0, _GLOBAL_COOLDOWN_UNTIL - time.time())
         return {
             "mode": "CENTRAL_PACED_HISTORY_WITH_GROWW_WINDOW_CONTRACT_V2",
-            "minimum_request_interval_seconds": float(settings.get("history_min_request_interval_seconds", 1.25)),
+            "minimum_request_interval_seconds": float(settings.get("history_min_request_interval_seconds", 2.0)),
+            "effective_min_request_interval_seconds": round(_effective_min_gap(settings), 3),
+            "background_request_allowed": cooldown <= 0.0,
             "global_cooldown_remaining_seconds": round(cooldown, 2),
             "consecutive_429": int(_CONSECUTIVE_429),
             "active_quarantines": len(active),
