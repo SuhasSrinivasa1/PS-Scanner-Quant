@@ -104,6 +104,24 @@ def events_near(*,symbol:Optional[str]=None,now:Optional[datetime]=None,hours_be
     return out
 
 
+
+def prime_risk_context(symbols,book:str,now:Optional[datetime]=None)->Dict[str,Dict[str,Any]]:
+    """Load the whole event window once, then map global/symbol events in memory."""
+    now=now or datetime.now(IST);before=1 if book=="INTRADAY" else 18;after=2 if book=="INTRADAY" else (72 if book=="WEEKLY" else 120)
+    syms={str(x or "").upper() for x in (symbols or []) if x}
+    try:rows=events_near(now=now,hours_before=before,hours_after=after)
+    except Exception:rows=[]
+    global_rows=[x for x in rows if not str(x.get("symbol") or "").strip()]
+    by={s:list(global_rows) for s in syms}
+    for ev in rows:
+        s=str(ev.get("symbol") or "").upper()
+        if s in by:by[s].append(ev)
+    out={}
+    for s,ev in by.items():
+        ev=sorted(ev,key=lambda x:str(x.get("starts_at") or ""));high=[x for x in ev if str(x.get("impact") or "").upper()=="HIGH" and x.get("kind")!="NSE_HOLIDAY"]
+        out[s]={"status":"WARN" if high else "PASS","high_impact_events":high,"events":ev[:12],"window_hours":{"before":before,"after":after},"source":"PERSISTED_POINT_IN_TIME_EVENT_CALENDAR_BATCHED"}
+    return out
+
 def risk_context(symbol:str,book:str,now:Optional[datetime]=None)->Dict[str,Any]:
     now=now or datetime.now(IST)
     before=1 if book=="INTRADAY" else 18
