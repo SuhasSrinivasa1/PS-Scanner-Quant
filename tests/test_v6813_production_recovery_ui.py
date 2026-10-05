@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import tempfile
@@ -36,6 +37,30 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
         self.assertIn("os.chmod(tmp,0o600)",s)
         self.assertNotIn("print(payload)",s)
         self.assertIn("Groww authentication VERIFIED",s)
+
+
+    def test_complete_totp_pair_is_recognized_as_configured(self):
+        from psscanner_quant import broker as broker_mod
+        old=broker_mod.CREDENTIALS_PATH
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/"groww_credentials.json"
+            try:
+                broker_mod.CREDENTIALS_PATH=p
+                b=broker_mod.GrowwBroker()
+                p.write_text(json.dumps({
+                    "auth_mode":"totp",
+                    "totp_token":"test-token",
+                    "totp_secret":"test-secret",
+                }))
+                self.assertTrue(b.configured())
+                self.assertTrue(b.status_cached()["configured"])
+                p.write_text(json.dumps({
+                    "auth_mode":"totp",
+                    "totp_token":"test-token",
+                }))
+                self.assertFalse(b.configured())
+            finally:
+                broker_mod.CREDENTIALS_PATH=old
 
     def test_ui_has_professional_command_center_and_recovery_visibility(self):
         s=self.text("static/index.html")
