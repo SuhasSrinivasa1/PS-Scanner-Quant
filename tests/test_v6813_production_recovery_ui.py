@@ -70,6 +70,11 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
         self.assertIsNone(re.search(r'rm\s+-rf\s+"\$\([^\n]+\)"?/\*',s))
         self.assertNotIn('rm -rf "$(brew --cache',s)
 
+    def test_migration_helper_is_invoked_through_python(self):
+        s=self.text("install.sh")
+        self.assertIn('python3 "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"',s)
+        self.assertNotIn('  "$SRC/tools/migrate_groww_secrets.py" "$APP" "$TMPSECRET"',s)
+
 
 if __name__=="__main__":
     unittest.main()
