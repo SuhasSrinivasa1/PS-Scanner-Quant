@@ -168,7 +168,7 @@ def groww_configure_totp(payload: GrowwTotpConfig, request: Request):
         "status":str(status.get("status") or "UNKNOWN"),
         "auth_mode":str(status.get("auth_mode") or (status.get("credential_capabilities") or {}).get("auth_mode") or "totp"),
         "credential_capabilities":status.get("credential_capabilities") or broker.credential_capabilities(),
-        "detail":status.get("detail"),
+        "detail":None if status.get("connected") else "Groww authentication probe did not connect.",
         "secret_values_returned":False,
         "storage":"LOCAL_CHMOD_600",
     }
