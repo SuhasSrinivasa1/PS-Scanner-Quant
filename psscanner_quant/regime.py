@@ -47,14 +47,22 @@ def classify(prices: Dict[str,float] | None=None, allow_network_prices: bool=Tru
         for a,b in zip(closes[-21:-1],closes[-20:]):
             if a>0:rets.append((b/a-1)*100)
         if len(rets)>=5:vol.append(float(pstdev(rets)))
-    if not moves:
-        prior=get_state("last_regime",{}) or {}
-        if prior:
-            state=dict(prior);state["stale"]=True;state["generated_at"]=now_iso()
-            state["history_source"]="PRIOR_COMPLETE_REGIME_FALLBACK_SUMMARY_UNAVAILABLE"
-            return state
-        return {"regime":"WARMING","sample":0,"universe":len(syms),"history_ready":history_ready,"generated_at":now_iso(),"stale":True,
-                "breadth_policy":"FULL_NSE_DATA_READY_EQUITIES","history_source":"SQLITE_HISTORY_SUMMARY_INDEX"}
+    minimum_sample=max(50,min(250,int(round(len(syms)*0.05))))
+    if len(moves)<minimum_sample:
+        # A tiny recovery sample is not a market regime. In particular, never publish a
+        # numerical RANGE/TREND classification from a handful of history-ready symbols.
+        state={
+            "regime":"WARMING","sample":len(moves),"universe":len(syms),"history_ready":history_ready,
+            "live_prices":len(prices),"minimum_sample_required":minimum_sample,
+            "coverage_pct":round((len(moves)/max(1,len(syms)))*100.0,2),
+            "ready_for_classification":False,"insufficient_sample":True,
+            "generated_at":now_iso(),"stale":True,
+            "breadth_policy":"FULL_NSE_DATA_READY_EQUITIES_NO_TOP_N_CAP",
+            "history_source":"SQLITE_HISTORY_SUMMARY_INDEX",
+            "reason":"INSUFFICIENT_HISTORY_READY_BREADTH",
+        }
+        set_state("last_regime",state)
+        return state
     up=sum(1 for x in moves if x>0.15)/len(moves)*100;down=sum(1 for x in moves if x<-0.15)/len(moves)*100
     med=median(moves);tv=sum(trend_votes)/max(1,len(trend_votes));rv=median(vol) if vol else 0.0;high_vol=rv>=2.2
     if down>=60 and tv<-0.25:regime="HIGH_VOL_TREND_DOWN" if high_vol else "TREND_DOWN"
@@ -65,6 +73,8 @@ def classify(prices: Dict[str,float] | None=None, allow_network_prices: bool=Tru
     state={"regime":regime,"breadth_up_pct":round(up,1),"breadth_down_pct":round(down,1),
            "median_move_pct":round(float(med),3),"trend_vote":round(tv,3),"realized_volatility_median_pct":round(rv,3),
            "sample":len(moves),"universe":len(syms),"history_ready":history_ready,"live_prices":len(prices),
+           "minimum_sample_required":minimum_sample,"coverage_pct":round((len(moves)/max(1,len(syms)))*100.0,2),
+           "ready_for_classification":True,"insufficient_sample":False,
            "generated_at":now_iso(),"stale":False,"breadth_policy":"FULL_NSE_DATA_READY_EQUITIES_NO_TOP_N_CAP",
            "history_source":"SQLITE_HISTORY_SUMMARY_INDEX"}
     set_state("last_regime",state);return state
