@@ -59,3 +59,12 @@ CI now writes the exact Git commit into BUILD_COMMIT inside every installable pa
 - Frozen recommendation identities remain immutable.
 - No forced recommendation quota and no hindsight replacement.
 - Challenger promotion remains OOS/holdout/cost/stability/multiple-testing/live-shadow evidence-gated.
+
+
+## Promotion provenance
+
+The implementation and regression release head promoted to `main` was:
+
+`850d59ca3b7e3a2b34b8f855975173c2946190c8`
+
+It passed macOS and Ubuntu regression jobs plus installable-package construction before promotion. The canonical main package embeds its own final main commit in `BUILD_COMMIT`.
