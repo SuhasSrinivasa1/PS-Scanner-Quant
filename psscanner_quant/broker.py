@@ -81,7 +81,12 @@ class GrowwBroker:
 
     def configured(self) -> bool:
         _, flat = self._read_credentials()
-        return bool(_first(flat, ["access_token", "token", "api_key", "user_api_key", "groww_api_key"]))
+        token = _first(flat, ["access_token", "auth_token", "api_auth_token", "token"])
+        api_key = _first(flat, ["api_key", "user_api_key", "groww_api_key"])
+        api_secret = _first(flat, ["api_secret", "secret", "groww_api_secret"])
+        totp_token = _first(flat, ["totp_token", "groww_totp_token"])
+        totp_secret = _first(flat, ["totp_secret", "totpseed", "totp_key"])
+        return bool(token or (api_key and api_secret) or (totp_token and totp_secret))
 
     def credential_capabilities(self) -> Dict[str, bool]:
         _, flat = self._read_credentials()
