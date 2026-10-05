@@ -48,10 +48,16 @@ def get_cached(symbol: str) -> Optional[Dict[str,Any]]:
     try:
         asof=datetime.fromisoformat(d["asof"])
         if asof.tzinfo is None:asof=asof.astimezone()
-        ttl=timedelta(hours=float(load_settings().get("fundamentals_ttl_hours",24)))
+        source=str(d.get("source") or "")
+        ttl=(timedelta(seconds=_NEGATIVE_TTL_SECONDS)
+             if source=="YAHOO_UNSUPPORTED_NEGATIVE_CACHE"
+             else timedelta(hours=float(load_settings().get("fundamentals_ttl_hours",24))))
         if datetime.now(asof.tzinfo)-asof>ttl:return None
+        if source=="YAHOO_UNSUPPORTED_NEGATIVE_CACHE":
+            with _NEGATIVE_LOCK:_NEGATIVE_CACHE[symbol.upper()]=time.monotonic()
+            return {}
         payload=json.loads(d["payload_json"] or "{}")
-        payload["_source"]=d["source"];payload["_asof"]=d["asof"]
+        payload["_source"]=source;payload["_asof"]=d["asof"]
         return payload
     except Exception:return None
 
@@ -106,8 +112,22 @@ def refresh(symbol: str) -> Dict[str,Any]:
         return payload
     except Exception as exc:
         msg=str(exc);low=msg.lower()
-        if any(x in low for x in ("404","quote not found","no fundamentals data","possibly delisted","no timezone found")):
+        unsupported=any(x in low for x in ("404","quote not found","no fundamentals data","possibly delisted","no timezone found"))
+        if unsupported:
             with _NEGATIVE_LOCK:_NEGATIVE_CACHE[sym]=time.monotonic()
+            # Persist the expected-negative result so service restarts do not rediscover
+            # the same unsupported Yahoo symbol and flood stderr/health telemetry again.
+            ts=now_iso()
+            try:
+                with db() as con:
+                    con.execute(
+                        "INSERT INTO fundamentals_cache(symbol,asof,source,payload_json) VALUES(?,?,?,?) "
+                        "ON CONFLICT(symbol) DO UPDATE SET asof=excluded.asof,source=excluded.source,payload_json=excluded.payload_json",
+                        (sym,ts,"YAHOO_UNSUPPORTED_NEGATIVE_CACHE","{}"),
+                    )
+            except Exception:
+                pass
+            return {}
         health("fundamentals","WARN",f"{symbol}: {msg}"[:240])
         return {}
 
@@ -159,7 +179,12 @@ def snapshot_status()->Dict[str,Any]:
         symbols=con.execute("SELECT COUNT(DISTINCT symbol) FROM fundamental_snapshots").fetchone()[0]
         first=con.execute("SELECT MIN(asof) FROM fundamental_snapshots").fetchone()[0]
         last=con.execute("SELECT MAX(asof) FROM fundamental_snapshots").fetchone()[0]
-    return {"snapshots":total,"symbols":symbols,"first_asof":first,"last_asof":last,"mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE","historical_backtest_policy":"Only snapshots captured by the decision timestamp are eligible; current fundamentals are never backfilled into the past."}
+    with db() as con:
+        unsupported=con.execute("SELECT COUNT(*) FROM fundamentals_cache WHERE source='YAHOO_UNSUPPORTED_NEGATIVE_CACHE'").fetchone()[0]
+    return {"snapshots":total,"symbols":symbols,"first_asof":first,"last_asof":last,
+            "unsupported_negative_cache":int(unsupported or 0),"negative_cache_ttl_seconds":_NEGATIVE_TTL_SECONDS,
+            "mode":"PROSPECTIVE_POINT_IN_TIME_CAPTURE",
+            "historical_backtest_policy":"Only snapshots captured by the decision timestamp are eligible; current fundamentals are never backfilled into the past."}
 
 
 def snapshot_history(symbol:str)->list[tuple[datetime,Dict[str,Any]]]:
