@@ -63,6 +63,69 @@ def _local_expected_session_positions(day: Optional[str] = None) -> Dict[Tuple[s
     return out
 
 
+def _external_position_baseline(day: Optional[str] = None) -> Tuple[Dict[Tuple[str,str],int],Dict[str,Any]]:
+    day=day or datetime.now(IST).date().isoformat()
+    state=get_state("external_position_baseline",{}) or {}
+    if str(state.get("day") or "")!=day:
+        return {},{}
+    raw=state.get("positions") or {}
+    out:Dict[Tuple[str,str],int]={}
+    if isinstance(raw,dict):
+        for key,value in raw.items():
+            try:
+                sym,product=str(key).upper().split("|",1)
+                qty=int(value)
+                if sym and product and qty:
+                    out[(sym,product)]=qty
+            except Exception:
+                continue
+    return out,state
+
+
+def acknowledge_external_position_baseline(confirm: str) -> Dict[str,Any]:
+    """Explicitly baseline current external CNC session positions after disaster recovery.
+
+    This never fabricates PS Scanner orders/fills. It records only the residual between
+    Groww's session quantity and the surviving local order ledger. MIS/unknown products
+    cannot be baselined because they are short-lived execution exposures.
+    """
+    if str(confirm or "").strip()!="ACKNOWLEDGE_EXTERNAL_CNC_BASELINE":
+        raise ValueError("explicit confirmation required")
+    day=datetime.now(IST).date().isoformat()
+    payload=broker.positions(); rows=_position_rows(payload)
+    broker_map:Dict[Tuple[str,str],int]={}
+    for r in rows:
+        sym=str(r.get("trading_symbol") or r.get("symbol") or "").upper()
+        product=str(r.get("product") or "").upper() or "UNKNOWN"
+        if sym:
+            broker_map[(sym,product)]=_session_quantity(r)
+    local=_local_expected_session_positions(day)
+    residual={}
+    unsafe=[]
+    for key in sorted(set(local)|{k for k,v in broker_map.items() if v!=0}):
+        delta=int(broker_map.get(key,0))-int(local.get(key,0))
+        if not delta:continue
+        if key[1]!="CNC":
+            unsafe.append({"symbol":key[0],"product":key[1],"residual":delta})
+        else:
+            residual[key]=delta
+    if unsafe:
+        raise ValueError("cannot baseline non-CNC session positions: "+json.dumps(unsafe,separators=(",",":")))
+    state={
+        "day":day,"captured_at":now_iso(),
+        "positions":{"%s|%s"%k:int(v) for k,v in residual.items()},
+        "source":"EXPLICIT_POST_RECOVERY_BROKER_BASELINE",
+        "scope":"EXTERNAL_CNC_SESSION_POSITIONS_ONLY",
+        "expires_after_trading_day":True,
+        "confirmation":"ACKNOWLEDGE_EXTERNAL_CNC_BASELINE",
+        "policy":"V6814_EXPLICIT_EXTERNAL_CNC_RECOVERY_BASELINE",
+    }
+    set_state("external_position_baseline",state)
+    health("position_reconcile","INFO","External CNC recovery baseline explicitly acknowledged",
+           {"count":len(residual),"symbols":[k[0] for k in residual],"policy":state["policy"]})
+    return {"baseline":state,"reconciliation":reconcile_positions()}
+
+
 def reconcile_positions() -> Dict[str,Any]:
     """Compare PS Scanner's current-day filled exposure with Groww's net session positions.
 
@@ -92,28 +155,38 @@ def reconcile_positions() -> Dict[str,Any]:
                         "carry_forward_debit_quantity":_int(r.get("carry_forward_debit_quantity")),
                         "session_quantity_formula":"quantity - net_carry_forward_quantity",
                         "realised_pnl":_float(r.get("realised_pnl"),0.0)})
-        expected=_local_expected_session_positions()
+        local_expected=_local_expected_session_positions()
+        baseline,baseline_state=_external_position_baseline()
+        expected=dict(local_expected)
+        for key,qty in baseline.items():
+            expected[key]=int(expected.get(key,0))+int(qty)
         keys=set(expected)|{k for k,v in broker_map.items() if v!=0}
         mismatches=[];external=[]
         for key in sorted(keys):
             exp=int(expected.get(key,0));actual=int(broker_map.get(key,0))
             if exp!=actual:
-                classification=("EXTERNAL_"+key[1]+"_SESSION_POSITION" if exp==0 and actual!=0
+                local_exp=int(local_expected.get(key,0))
+                classification=("EXTERNAL_"+key[1]+"_SESSION_POSITION" if local_exp==0 and actual!=0
                                 else "BROKER_LOCAL_SESSION_QUANTITY_MISMATCH")
                 item={"symbol":key[0],"product":key[1],"expected_session_quantity":exp,
+                      "local_expected_session_quantity":local_exp,
+                      "external_baseline_quantity":int(baseline.get(key,0)),
                       "broker_session_quantity":actual,"delta":actual-exp,
                       "classification":classification,
                       "broker_session_quantity_formula":"quantity - net_carry_forward_quantity"}
                 mismatches.append(item)
-                if exp==0 and actual!=0:external.append(item)
+                if local_exp==0 and actual!=0:external.append(item)
         out={
             "at":at,"verified":True,"hard_block":bool(mismatches),"mismatches":mismatches,
             "external_session_positions":external,
+            "external_baseline_active":bool(baseline),
+            "external_baseline":baseline_state,
+            "expected_local":{"%s|%s"%k:v for k,v in local_expected.items()},
             "expected":{"%s|%s"%k:v for k,v in expected.items()},
             "broker":{"%s|%s"%k:v for k,v in broker_map.items()},
             "broker_realised_pnl":realized,"positions":raw,
             "policy":POSITION_POLICY,
-            "position_semantics":"Groww quantity minus net_carry_forward_quantity; mismatches remain fail-closed.",
+            "position_semantics":"Groww quantity minus net_carry_forward_quantity; explicitly acknowledged recovery CNC baseline is additive; any later mismatch remains fail-closed.",
         }
         set_state("position_reconciliation",out)
         if mismatches:
