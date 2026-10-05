@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -57,6 +57,10 @@ class SettingsPatch(BaseModel):
     manual_execution_enabled: Optional[bool]=None
     execution_slippage_reserve_bps: Optional[float]=None
     execution_min_net_edge_rupees: Optional[float]=None
+
+class GrowwTotpConfig(BaseModel):
+    totp_token: str
+    totp_secret: str
 
 @app.on_event("startup")
 def _startup():
@@ -140,6 +144,34 @@ def groww_status(refresh: bool=False):
     This endpoint never checks or gates on Static IP; Static IP is an order-execution control.
     """
     return broker.status() if refresh else broker.status_cached()
+
+@app.post("/api/groww/configure-totp")
+def groww_configure_totp(payload: GrowwTotpConfig, request: Request):
+    """Local-only secure TOTP setup for the browser UI.
+
+    Secret values are written only to data/secure/groww_credentials.json with mode 0600.
+    They are never returned by this endpoint and never written to settings/system_state.
+    """
+    host=str(request.client.host if request.client else "")
+    if host not in ("127.0.0.1","::1","localhost"):
+        raise HTTPException(403,"Groww credential configuration is available only from localhost.")
+    try:
+        broker.configure_totp(payload.totp_token,payload.totp_secret)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc))
+    except Exception:
+        raise HTTPException(500,"Unable to write Groww credentials to the local secure store.")
+    status=broker.status()
+    return {
+        "configured":bool(status.get("configured")),
+        "connected":bool(status.get("connected")),
+        "status":str(status.get("status") or "UNKNOWN"),
+        "auth_mode":str(status.get("auth_mode") or (status.get("credential_capabilities") or {}).get("auth_mode") or "totp"),
+        "credential_capabilities":status.get("credential_capabilities") or broker.credential_capabilities(),
+        "detail":status.get("detail"),
+        "secret_values_returned":False,
+        "storage":"LOCAL_CHMOD_600",
+    }
 
 @app.get("/api/health")
 def health():
