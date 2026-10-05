@@ -142,6 +142,21 @@ class V6814TomorrowReadinessTests(unittest.TestCase):
         finally:
             dbmod.DB_PATH=old_db
 
+    def test_release_identity_and_static_ip_scope(self):
+        from psscanner_quant.constants import VERSION
+        self.assertEqual(VERSION,"6.8.14")
+        main=(Path(__file__).resolve().parents[1]/"psscanner_quant/main.py").read_text()
+        workflow=(Path(__file__).resolve().parents[1]/".github/workflows/ci.yml").read_text()
+        self.assertIn('"build_commit":build_commit()',main)
+        self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$STAGE/BUILD_COMMIT"',workflow)
+        self.assertIn('"static_ip_policy":"EXECUTION_ONLY"',main)
+
+    def test_external_baseline_api_is_local_only_and_explicit(self):
+        main=(Path(__file__).resolve().parents[1]/"psscanner_quant/main.py").read_text()
+        self.assertIn('/api/execution/positions/acknowledge-external-baseline',main)
+        self.assertIn('host not in ("127.0.0.1","::1","localhost")',main)
+        self.assertIn("ACKNOWLEDGE_EXTERNAL_CNC_BASELINE",(Path(__file__).resolve().parents[1]/"psscanner_quant/execution_integrity.py").read_text())
+
 
 if __name__=="__main__":
     unittest.main()
