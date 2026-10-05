@@ -19,7 +19,7 @@ from .db import db, health, get_state, set_state, now_iso
 from .broker import broker
 from .engine import (_insert_rec, _observe, _publish_frozen, period_key, _target_feasibility, _risk_geometry,
     _period_has_valid_frozen_book, _horizon_freeze_window, _freeze_contract_min, _freeze_contract_count,
-    _horizon_target_context, _append_discovery_capacity, _publish_append_discoveries)
+    _horizon_target_context, _append_discovery_capacity, _publish_append_discoveries, _activate_recommendation, _rec_rationale)
 from .regime import classify
 from .global_context import snapshot as global_snapshot
 from .trade_intelligence import evaluate as evaluate_trade_intelligence
@@ -27,7 +27,7 @@ from .portfolio_risk import recommendation_cluster
 from .trading_calendar import is_regular_trading_day, next_trading_day
 from .sector_context import context as sector_context, context_cached as sector_context_cached
 from .event_calendar import risk_context as event_risk_context
-from .evidence_fabric import publish as fabric_publish, symbol_context as fabric_symbol_context
+from .evidence_fabric import publish as fabric_publish, symbol_context as fabric_symbol_context, prime_symbol_context as fabric_prime_symbol_context
 from .config import load_settings
 
 NY = ZoneInfo("America/New_York")
@@ -80,49 +80,36 @@ def warm_etf_history(max_symbols:int=None)->Dict[str,Any]:
 
 
 def scan_etfs(sides: Optional[tuple]=None, target_now: Optional[datetime]=None)->List[Dict[str,Any]]:
-    started=time.monotonic();syms=_etf_symbols()
-    syms=[s for s in syms if _history_path(s,'1day').exists()]
-    prices=live_prices(syms,allow_network=False,max_age_seconds=180); regime_state=get_state('last_regime',{}) or {'regime':'WARMING','trend_vote':0,'breadth_up_pct':0,'breadth_down_pct':0,'stale':True};regime=(regime_state.get('regime') or 'WARMING');g=get_state('global_context',{}) or {'risk_state':'UNKNOWN','moves_pct':{},'stale':True};out=[]
-    stats={'book':'ETF','started_at':now_iso(),'universe':len(syms),'history_ready':0,'eligible':0,
-           'capacity_prefilter_reject':0,'intelligence_reject':0,
+    started=time.monotonic();all_syms=_etf_symbols();syms=[s for s in all_syms if _history_path(s,'1day').exists()]
+    prices=live_prices(syms,allow_network=False,max_age_seconds=180);regime_state=get_state('last_regime',{}) or {'regime':'WARMING','trend_vote':0,'breadth_up_pct':0,'breadth_down_pct':0,'stale':True};regime=(regime_state.get('regime') or 'WARMING');g=get_state('global_context',{}) or {'risk_state':'UNKNOWN','moves_pct':{},'stale':True};out=[]
+    stats={'book':'ETF','started_at':now_iso(),'universe_total':len(all_syms),'universe':len(syms),'history_path_missing':max(0,len(all_syms)-len(syms)),
+           'history_ready':0,'history_short_reject':0,'price_reject':0,'score_reject':0,'capacity_prefilter_reject':0,
+           'intelligence_reject':0,'final_target_reject':0,'eligible':0,'near_misses':[],
            'universe_policy':'ALL_CACHED_ETFS_NO_GATE_RELAXATION'}
-    scan_sides=tuple(sides or ('LONG','SHORT'))
+    scan_sides=tuple(sides or ('LONG','SHORT'));meta_rows=[r for r in instrument_rows() if str(r.get('trading_symbol') or '').upper() in set(syms)]
+    ctx=fabric_prime_symbol_context(syms,book='ETF',meta_rows=[{'symbol':r.get('trading_symbol'),'industry':r.get('industry'),'sector':r.get('sector')} for r in meta_rows])
+    def near(sym,stage,detail=None,score=None):
+        stats['near_misses'].append({'symbol':sym,'stage':stage,'detail':detail,'score':round(float(score),2) if score is not None else None});stats['near_misses']=stats['near_misses'][-12:]
     for s in syms:
         df=history(s,'1day',allow_network=False)
-        if len(df)<30: continue
-        stats['history_ready']+=1
-        f=latest_features(df);f['higher_tf_trend']=f.get('trend',0);px=float(prices.get(s) or f.get('close') or 0);f['close']=px
-        if px<=0: continue
+        if len(df)<30:stats['history_short_reject']+=1;near(s,'HISTORY',f'rows={len(df)}');continue
+        stats['history_ready']+=1;f=latest_features(df);f['higher_tf_trend']=f.get('trend',0);px=float(prices.get(s) or f.get('close') or 0);f['close']=px
+        if px<=0:stats['price_reject']+=1;near(s,'PRICE');continue
         candles=detect_patterns(df)
         for side in scan_sides:
-            sign=1 if side=='LONG' else -1
-            trend=sign*float(f.get('trend') or 0)>0; mom=sign*float(f.get('ret20') or 0)>0; vol=float(f.get('volume_ratio') or 0)
+            sign=1 if side=='LONG' else -1;trend=sign*float(f.get('trend') or 0)>0;mom=sign*float(f.get('ret20') or 0)>0;vol=float(f.get('volume_ratio') or 0)
             score=45+(18 if trend else -10)+(18 if mom else -8)+min(14,max(0,(vol-1)*10))
-            if (regime.startswith('TREND_DOWN') and side=='SHORT') or (regime.startswith('TREND_UP') and side=='LONG'): score+=8
-            if score<68:continue
-            data_conf=min(1.0,len(df)/120*.65+.25)
-            # Capacity/data prefilter uses optimistic score/confidence. If even the
-            # optimistic case cannot satisfy the unchanged ETF target gate, expensive
-            # portfolio-correlation and intelligence work cannot rescue it.
-            optimistic_tf=_target_feasibility('ETF',side,f,100.0,1.0,data_conf,None,now=target_now)
-            if not optimistic_tf['target_qualified']:
-                stats['capacity_prefilter_reject']+=1
-                continue
-            portfolio=recommendation_cluster(s,side)
-            shared_ctx=fabric_symbol_context(s,book='ETF',side=side,features=f,fundamentals={})
+            if (regime.startswith('TREND_DOWN') and side=='SHORT') or (regime.startswith('TREND_UP') and side=='LONG'):score+=8
+            if score<68:stats['score_reject']+=1;near(s,'SCORE',f'trend={trend}; momentum={mom}; volume_ratio={vol:.2f}',score);continue
+            data_conf=min(1.0,len(df)/120*.65+.25);optimistic_tf=_target_feasibility('ETF',side,f,100.0,1.0,data_conf,None,now=target_now)
+            if not optimistic_tf['target_qualified']:stats['capacity_prefilter_reject']+=1;near(s,'CAPACITY_PREFILTER',';'.join(optimistic_tf.get('rejection_reasons') or []),score);continue
+            portfolio=recommendation_cluster(s,side);shared_ctx=fabric_symbol_context(s,book='ETF',side=side,features=f,fundamentals={},primed=ctx)
             ti=evaluate_trade_intelligence(book='ETF',symbol=s,side=side,features=f,fundamentals={},regime_state=regime_state,candle_info=candles,news=shared_ctx['news'],global_ctx=g,portfolio=portfolio,sector_ctx=shared_ctx['sector'],event_ctx=shared_ctx['events'],institutional_ctx=shared_ctx['institutional'],target_pct=5.0,stop_pct=max(.7,min(4,float(f.get('atr_pct') or 1.5))),strategy_ids=['ETF_TREND','ETF_MOMENTUM','ETF_VOLUME'],data_confidence=data_conf)
-            if ti['decision']!='ELIGIBLE':
-                stats['intelligence_reject']+=1
-                continue
-            final=.72*min(100,score)+.28*ti['score']
-            tf=_target_feasibility('ETF',side,f,final,min(1,.45+(score-68)/50),data_conf,None,now=target_now)
-            if not tf['target_qualified']:continue
-            stats['eligible']+=1
-            out.append({'symbol':s,'side':side,'score':final,'confidence':min(1,.45+(score-68)/50),'price':px,'features':f,'regime':regime,'strategies':['ETF_TREND','ETF_MOMENTUM','ETF_VOLUME'],'target_feasibility':tf,'rationale':{'reasons':['ETF trend alignment','20-session momentum','volume/liquidity confirmation'],'data_confidence':data_conf,'candlestick_context':candles,'trade_intelligence':ti,'target_feasibility':tf,'global_context':g,'portfolio_fit':portfolio,'institutional_context':shared_ctx['institutional'],'evidence_fabric_policy':shared_ctx['fabric_policy']}})
-    out.sort(key=lambda x:x['score'],reverse=True)
-    stats.update({'candidates':len(out),'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)})
-    set_state('scan_detail_ETF',stats)
-    return out
+            if ti['decision']!='ELIGIBLE':stats['intelligence_reject']+=1;near(s,'INTELLIGENCE','; '.join((ti.get('hard_blockers') or [])[:3]),score);continue
+            final=.72*min(100,score)+.28*ti['score'];tf=_target_feasibility('ETF',side,f,final,min(1,.45+(score-68)/50),data_conf,None,now=target_now)
+            if not tf['target_qualified']:stats['final_target_reject']+=1;near(s,'FINAL_TARGET',';'.join(tf.get('rejection_reasons') or []),final);continue
+            stats['eligible']+=1;out.append({'symbol':s,'side':side,'score':final,'confidence':min(1,.45+(score-68)/50),'price':px,'features':f,'regime':regime,'strategies':['ETF_TREND','ETF_MOMENTUM','ETF_VOLUME'],'target_feasibility':tf,'rationale':{'reasons':['ETF trend alignment','20-session momentum','volume/liquidity confirmation'],'data_confidence':data_conf,'candlestick_context':candles,'trade_intelligence':ti,'target_feasibility':tf,'global_context':g,'portfolio_fit':portfolio,'institutional_context':shared_ctx['institutional'],'evidence_fabric_policy':shared_ctx['fabric_policy']}})
+    out.sort(key=lambda x:x['score'],reverse=True);stats['funnel']={k:stats[k] for k in ('universe_total','history_path_missing','history_ready','history_short_reject','price_reject','score_reject','capacity_prefilter_reject','intelligence_reject','final_target_reject','eligible')};stats.update({'candidates':len(out),'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)});set_state('scan_detail_ETF',stats);return out
 
 
 def _etf_missed_freeze_recovery_allowed(now: datetime, existing: int, required: int, preperiod: bool) -> bool:
@@ -455,27 +442,36 @@ def _international_weekly_geometry(f:Dict[str,Any],remaining_sessions:int,cost_r
 
 
 def update_international_books(intraday_map:Optional[Dict[str,Any]]=None)->int:
-    # v6.3.1: INTERNATIONAL is a frozen weekly LONG-only book. Rows are repriced
-    # while U.S. data is available but are NOT closed at each daily session end.
+    """Reprice only active U.S. week/session rows; future-week identities stay prepared."""
     session=_us_session();now=datetime.now(IST);local=now.astimezone(NY);week_key=_us_week_key(local.date());closed=0
     with db() as con:rows=[dict(r) for r in con.execute("SELECT * FROM recommendations WHERE book='INTERNATIONAL' AND state='LIVE'").fetchall()]
     if not rows:return 0
-    symbols=sorted({r['symbol'] for r in rows});imap=intraday_map if intraday_map is not None else _shared_international_history(symbols,'5d','5m',90.0)
-    week_over=bool(local.weekday()>4 or (local.weekday()==4 and local.time().replace(tzinfo=None)>=US_CLOSE))
+    active_rows=[r for r in rows if str(r.get('period_key') or '')<=week_key]
+    if not active_rows:return 0
+    symbols=sorted({r['symbol'] for r in active_rows});imap=intraday_map if intraday_map is not None else (_shared_international_history(symbols,'5d','5m',90.0) if session.get('open') else {})
+    week_over=bool(local.weekday()==4 and local.time().replace(tzinfo=None)>=US_CLOSE)
     with db() as con:
-        for r in rows:
-            df=imap.get(r['symbol']) if isinstance(imap,dict) else None;px=float(r['current_price'] or r['entry_price'])
-            if df is not None and len(df):
-                try:px=float(df['close'].dropna().iloc[-1])
-                except Exception:pass
+        for r in active_rows:
+            if str(r.get('period_key') or '')<week_key:
+                con.execute("UPDATE recommendations SET state='CLOSED',closed_at=?,result='MISS',close_reason='US_WEEK_ROLLOVER',updated_at=? WHERE recommendation_id=? AND state='LIVE'",(now_iso(),now_iso(),r['recommendation_id']));closed+=1;continue
+            # Current-week target/stop evaluation is only valid during U.S. regular trading.
+            if not session.get('open'):
+                if week_over:
+                    con.execute("UPDATE recommendations SET state='CLOSED',closed_at=?,result='MISS',close_reason='US_WEEK_END',updated_at=? WHERE recommendation_id=? AND state='LIVE'",(now_iso(),now_iso(),r['recommendation_id']));closed+=1
+                continue
+            df=imap.get(r['symbol']) if isinstance(imap,dict) else None
+            if df is None or not len(df):continue
+            try:px=float(df['close'].dropna().iloc[-1])
+            except Exception:continue
+            rationale=_rec_rationale(r)
+            if rationale.get('activation_pending') is True:
+                r=_activate_recommendation(con,r,px,now)
+                continue
             entry=float(r['entry_price'] or 0);move=(px/entry-1)*100 if entry>0 else 0.0;mfe=max(float(r['max_favourable_pct'] or 0),move);mae=min(float(r['max_adverse_pct'] or 0),move);reason=result=None
             if move>=float(r['target_pct'] or 0):reason='WEEKLY_TARGET_REACHED';result='WIN'
             elif px<=float(r['stop_price'] or 0):reason='WEEKLY_THESIS_INVALIDATED';result='LOSS'
-            elif r['period_key']!=week_key or week_over:reason='US_WEEK_END';result='MISS'
-            if reason:
-                con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,state='CLOSED',closed_at=?,result=?,close_reason=?,updated_at=? WHERE recommendation_id=? AND state='LIVE'",(px,mfe,mae,now_iso(),result,reason,now_iso(),r['recommendation_id']));closed+=1
-            else:
-                con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,updated_at=? WHERE recommendation_id=?",(px,mfe,mae,now_iso(),r['recommendation_id']))
+            if reason:con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,state='CLOSED',closed_at=?,result=?,close_reason=?,updated_at=? WHERE recommendation_id=? AND state='LIVE'",(px,mfe,mae,now_iso(),result,reason,now_iso(),r['recommendation_id']));closed+=1
+            else:con.execute("UPDATE recommendations SET current_price=?,max_favourable_pct=?,max_adverse_pct=?,updated_at=? WHERE recommendation_id=?",(px,mfe,mae,now_iso(),r['recommendation_id']))
     return closed
 
 
@@ -549,27 +545,34 @@ def run_international_cycle():
     reserve=float(settings.get('international_weekly_cost_reserve_pct',.50));cap=float(settings.get('international_weekly_target_cap_pct',8.0))
     base_min=float(settings.get('international_weekly_min_score',78.0));min_score=base_min+(float(settings.get('horizon_append_score_uplift',5.0)) if append_mode else 0.0)
     candidates=[];stale=0
+    funnel={"universe":len(US_WEEKLY_UNIVERSE),"existing_identity":0,"history_short":0,"stale":0,"price_reject":0,"trend_reject":0,"momentum_reject":0,"z_reject":0,"geometry_reject":0,"score_reject":0,"intelligence_reject":0,"append_confirmation_reject":0,"qualified":0}
+    near=[]
+    def intl_near(sym,stage,detail=None,score=None):
+        near.append({"symbol":sym,"stage":stage,"detail":detail,"score":round(float(score),2) if score is not None else None})
+        if len(near)>12:del near[0]
     for sym in US_WEEKLY_UNIVERSE:
-        if sym in existing_symbols:continue
+        if sym in existing_symbols:funnel["existing_identity"]+=1;continue
         dd=daily.get(sym)
-        if dd is None or len(dd)<120:continue
+        if dd is None or len(dd)<120:funnel["history_short"]+=1;intl_near(sym,"HISTORY",f"rows={len(dd) if dd is not None else 0}");continue
         age=_daily_bar_age_days(dd,local)
-        if age is None or age<0 or age>5:stale+=1;continue
+        if age is None or age<0 or age>5:stale+=1;funnel['stale']+=1;intl_near(sym,'STALE',f'age_days={age}');continue
         try:px=float(dd['close'].dropna().iloc[-1])
-        except Exception:continue
-        if px<=0:continue
+        except Exception:funnel['price_reject']+=1;continue
+        if px<=0:funnel['price_reject']+=1;continue
         f=latest_features(dd);f['close']=px;f['higher_tf_trend']=f.get('trend',0);candles=detect_patterns(dd)
         trend=float(f.get('trend') or 0)>0;ret5=float(f.get('ret5') or 0);ret20=float(f.get('ret20') or 0);ret60=float(f.get('ret60') or 0);adx=float(f.get('adx14') or 0);z=float(f.get('z20') or 0)
-        if not trend or ret20<=0 or ret60<=0 or z>2.8:continue
+        if not trend:funnel['trend_reject']+=1;intl_near(sym,'TREND');continue
+        if ret20<=0 or ret60<=0:funnel['momentum_reject']+=1;intl_near(sym,'MOMENTUM',f'ret20={ret20:.2f};ret60={ret60:.2f}');continue
+        if z>2.8:funnel['z_reject']+=1;intl_near(sym,'EXTENSION',f'z20={z:.2f}');continue
         geom=_international_weekly_geometry(f,remaining_sessions,reserve,cap)
-        if not geom['feasible']:continue
+        if not geom['feasible']:funnel['geometry_reject']+=1;intl_near(sym,'GEOMETRY',str(geom));continue
         score=52.0+min(14,max(0,ret5)*2.0)+min(16,max(0,ret20)*.75)+min(8,max(0,ret60)*.20)+min(8,max(0,adx-15)*.35)
-        if score<min_score:continue
+        if score<min_score:funnel['score_reject']+=1;intl_near(sym,'SCORE',f'min={min_score:.1f}',score);continue
         ti=evaluate_trade_intelligence(book='INTERNATIONAL',symbol=sym,side='LONG',features=f,fundamentals={},regime_state=regime_state,candle_info=candles,global_ctx=g,target_pct=geom['target_pct'],stop_pct=geom['stop_pct'],strategy_ids=['US_WEEKLY_TREND','US_WEEKLY_MOMENTUM','US_WEEKLY_LOW_TURNOVER'],data_confidence=.86)
-        if ti['decision']!='ELIGIBLE':continue
-        if append_mode and str((ti.get('evidence_combination') or {}).get('combination_state')) not in ('CONFIRMED','STRONG'):continue
+        if ti['decision']!='ELIGIBLE':funnel['intelligence_reject']+=1;intl_near(sym,'INTELLIGENCE','; '.join((ti.get('hard_blockers') or [])[:3]),score);continue
+        if append_mode and str((ti.get('evidence_combination') or {}).get('combination_state')) not in ('CONFIRMED','STRONG'):funnel['append_confirmation_reject']+=1;continue
         edge=max(0.0,geom['capacity_pct']*min(1.05,max(.65,score/100.0))*.58-reserve)
-        candidates.append((edge,score,sym,px,f,candles,ti,geom,age))
+        candidates.append((edge,score,sym,px,f,candles,ti,geom,age));funnel['qualified']+=1
     need=max(0,required-existing)
     take=min(need,max_longs) if not append_mode else min(append_cap.get('remaining_total',0),append_cap.get('remaining_today',0))
     made=0
@@ -580,7 +583,8 @@ def run_international_cycle():
             'cost_reserve_pct':geom['cost_reserve_pct'],'expected_net_target_pct':geom['expected_net_target_pct'],'expected_net_weekly_edge_pct':round(edge,4),
             'weekly_rank':rank,'daily_bar_age_days':age,'selection_objective':'MAX_EXPECTED_NET_WEEKLY_RETURN_AMONG_DATA_VALID_US_UNIVERSE',
             'turnover_policy':'ONE_FROZEN_ENTRY_PER_SYMBOL_PER_WEEK_NO_REPLACEMENT','target_is_not_guaranteed':True,
-            'selection_phase':'APPEND_DISCOVERY' if append_mode else 'INITIAL_FREEZE','initial_frozen_slate_preserved':True,'append_only':True}
+            'selection_phase':'APPEND_DISCOVERY' if append_mode else 'INITIAL_FREEZE','initial_frozen_slate_preserved':True,'append_only':True,
+            'activation_pending':True,'entry_activation_policy':'FIRST_FRESH_US_REGULAR_SESSION_QUOTE'}
         rid=_insert_rec('INTERNATIONAL',sym,'LONG',score,.78,px,f,'US_WEEKLY',['US_WEEKLY_TREND','US_WEEKLY_MOMENTUM','US_WEEKLY_LOW_TURNOVER'],rationale,exchange='US',target_pct_override=geom['target_pct'],stop_pct_override=geom['stop_pct'],period_key_override=week_key)
         if rid:made+=1
     total=_freeze_contract_count('INTERNATIONAL',week_key);shortage=max(0,required-total);complete=total>=required
@@ -594,8 +598,7 @@ def run_international_cycle():
     set_state('international_weekly_freeze_'+week_key,freeze_payload)
     status=('APPEND_DISCOVERY_ADDED' if append_mode and made else 'APPEND_DISCOVERY_NO_NEW_HIGH_CONVICTION') if append_mode else ('CONTRACT_FULFILLED' if complete else 'FREEZE_CONTRACT_SHORTAGE_RECOVERY_REQUIRED')
     freeze_payload['reason']=None if complete else ('NO_FRESH_DAILY_DATA' if not daily else ('FEWER_THAN_FIVE_DATA_VALID_US_CANDIDATES' if len(candidates)<required else 'QUALIFIED_CANDIDATES_ACCUMULATING'))
-    stats.update({'inserted':made,'published':total,'qualified_candidates':len(candidates),'status':status,'contract':freeze_payload,
+    stats.update({'inserted':made,'published':total,'qualified_candidates':len(candidates),'funnel':funnel,'near_misses':near,'status':status,'contract':freeze_payload,
                   'running':False,'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)})
     set_state('scan_status_INTERNATIONAL',stats);return made
-
 
