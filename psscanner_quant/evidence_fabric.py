@@ -8,10 +8,10 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .constants import IST
 from .db import db, get_state, now_iso, set_state
-from .event_calendar import risk_context as event_risk_context
-from .institutional_intelligence import context as institutional_context, cached_status as institutional_status
-from .news_context import context as news_context
-from .sector_context import context_cached as sector_context_cached
+from .event_calendar import risk_context as event_risk_context, prime_risk_context as prime_event_risk_context
+from .institutional_intelligence import context as institutional_context, cached_status as institutional_status, prime_ownership_cache
+from .news_context import context as news_context, prime_cache as prime_news_cache
+from .sector_context import context_cached as sector_context_cached, prime_symbol_meta
 
 FABRIC_POLICY = "V680_ONE_OBSERVATION_MANY_CONSUMERS"
 _LOCK = RLock()
@@ -140,21 +140,42 @@ def priority_symbols(limit: int = 160) -> List[str]:
     return out[:max(1,int(limit))]
 
 
+def prime_symbol_context(symbols:Iterable[str], *, book:str, meta_rows:Optional[Iterable[Dict[str,Any]]]=None) -> Dict[str,Any]:
+    """Prime passive per-symbol evidence with O(1) bounded datastore snapshots per batch."""
+    syms=[]
+    for raw in symbols or []:
+        s=str(raw or "").upper()
+        if s and s not in syms:syms.append(s)
+    try:prime_symbol_meta(meta_rows)
+    except Exception:pass
+    try:news=prime_news_cache(syms)
+    except Exception:news={}
+    try:events=prime_event_risk_context(syms,book)
+    except Exception:events={}
+    try:prime_ownership_cache(syms)
+    except Exception:pass
+    try:global_ctx=get_state("global_context",{}) or {"risk_state":"UNKNOWN","stale":True}
+    except Exception:global_ctx={"risk_state":"UNKNOWN","stale":True}
+    return {"symbols":len(syms),"book":str(book).upper(),"global":global_ctx,"news":news,"events":events,
+            "network_calls":False,"policy":"V6812_BATCH_PRIMED_CACHE_ONLY_SYMBOL_CONTEXT"}
+
+
 def symbol_context(symbol: str, *, book: str, side: str, features: Dict[str,Any],
-                   fundamentals: Optional[Dict[str,Any]]=None) -> Dict[str,Any]:
-    """Compose all non-network per-symbol evidence from the shared fabric/caches."""
-    sym=str(symbol).upper()
-    fundamentals=fundamentals or {}
+                   fundamentals: Optional[Dict[str,Any]]=None, primed:Optional[Dict[str,Any]]=None) -> Dict[str,Any]:
+    """Compose non-network per-symbol evidence, preferring one batch-primed snapshot."""
+    sym=str(symbol).upper();fundamentals=fundamentals or {};primed=primed or {}
+    news_map=primed.get("news") if isinstance(primed.get("news"),dict) else {}
+    event_map=primed.get("events") if isinstance(primed.get("events"),dict) else {}
     return {
-        "global":get_state("global_context",{}) or {"risk_state":"UNKNOWN","stale":True},
-        "sector":sector_context_cached(sym,side),
-        "news":news_context(sym,allow_refresh=False),
-        "events":event_risk_context(sym,book),
+        "global":primed.get("global") or get_state("global_context",{}) or {"risk_state":"UNKNOWN","stale":True},
+        "sector":sector_context_cached(sym,side,features=features),
+        "news":dict(news_map.get(sym) or {}) if sym in news_map else news_context(sym,allow_refresh=False),
+        "events":dict(event_map.get(sym) or {}) if sym in event_map else event_risk_context(sym,book),
         "institutional":institutional_context(sym,features=features,fundamentals=fundamentals),
         "fabric_policy":FABRIC_POLICY,
         "network_calls":False,
+        "batch_primed":bool(primed),
     }
-
 
 def cached_institutional_status() -> Dict[str,Any]:
     return institutional_status()
