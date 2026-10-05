@@ -254,6 +254,7 @@ CREATE TABLE IF NOT EXISTS trade_decisions (
   realized_outcome TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_trade_decisions_book_ts ON trade_decisions(book,ts DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_decisions_book_id ON trade_decisions(book,id DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_decisions_symbol ON trade_decisions(symbol,side,ts DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_decisions_ts_decision ON trade_decisions(ts DESC,decision);
 
