@@ -73,6 +73,7 @@ PY
   elif [[ $migrate_rc -eq 4 || $migrate_rc -eq 5 ]]; then
     echo "No validated Groww credential bundle survived on disk."
     echo "Continuing recovery with execution fail-closed; configure Groww after install."
+    if [[ "$MODE" == "migration" ]]; then MODE="recovery"; fi
   else
     echo "Groww credential migration helper failed unexpectedly (exit $migrate_rc)." >&2
     exit $migrate_rc
@@ -135,10 +136,13 @@ if r.get("reason") == "INVALID_SETTINGS_JSON":
 PYSET
   )
   # Verify the target runtime file itself, independent of Python import resolution.
-  python3 - "$APP/data/settings.json" <<'PYVERIFY'
+  python3 - "$APP/data/settings.json" "$MODE" <<'PYVERIFY'
 import json,sys
 from pathlib import Path
-p=Path(sys.argv[1])
+p=Path(sys.argv[1]); mode=sys.argv[2]
+if not p.exists() and mode=="recovery":
+    print("Recovery settings migration: no settings.json survived; runtime defaults will initialize cleanly.")
+    raise SystemExit(0)
 d={}
 if p.exists():
     d=json.loads(p.read_text())
@@ -155,7 +159,11 @@ PYVERIFY
   # Nothing is deleted; rollback remains untouched.
   python3 - "$APP/data/psscanner_quant.db" <<'PY2'
 import sqlite3,sys
+from pathlib import Path
 p=sys.argv[1]
+if not Path(p).exists():
+    print("Ledger migration skipped: no prior SQLite database survived.")
+    raise SystemExit(0)
 try:
     con=sqlite3.connect(p)
     def close_where(where, reason):
