@@ -164,6 +164,7 @@ jobs:
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
           git archive HEAD | tar -x -C "$STAGE"
+          printf '%s\n' "$GITHUB_SHA" > "$STAGE/BUILD_COMMIT"
           rm -rf "$STAGE/.github"
           find "$STAGE" -type d -name '__pycache__' -prune -exec rm -rf {} +
           find "$STAGE" -type f -name '*.pyc' -delete
