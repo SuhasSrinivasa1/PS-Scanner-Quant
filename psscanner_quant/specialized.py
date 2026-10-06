@@ -11,7 +11,7 @@ from .constants import (IST, MARKET_OPEN, MARKET_CLOSE, CIRCUIT_LIVE_CUTOFF, CIR
 from .data import (
     instrument_rows, instrument, history, live_prices, liquidity_rank, universe, full_nse_symbols,
     international_batch_history, GLOBAL_UNIVERSE, US_WEEKLY_UNIVERSE, _history_path,
-    _load_raw_candles, _candle_fields, _number,
+    _load_raw_candles, _candle_fields, _number, _looks_like_etf_row,
 )
 from .features import latest_features
 from .candle_patterns import detect_patterns
@@ -29,6 +29,7 @@ from .sector_context import context as sector_context, context_cached as sector_
 from .event_calendar import risk_context as event_risk_context
 from .evidence_fabric import publish as fabric_publish, symbol_context as fabric_symbol_context, prime_symbol_context as fabric_prime_symbol_context
 from .config import load_settings
+from .history_control import background_request_allowed
 
 NY = ZoneInfo("America/New_York")
 US_OPEN = dtime(9, 30)
@@ -54,43 +55,75 @@ def _shared_international_history(symbols:List[str],period:str,interval:str,ttl_
 
 
 def _is_etf(r:Dict[str,str])->bool:
-    s=(r.get('trading_symbol') or '').upper(); n=(r.get('name') or '').upper(); t=(r.get('instrument_type') or '').upper()
-    return t=='ETF' or ' ETF' in ' '+n or s.endswith('ETF') or 'BEES' in s or 'IETF' in s
+    # Keep ETF classification identical to the data-layer stock-universe exclusion.
+    # Groww represents many NSE ETFs as instrument_type=EQ / series=EQ, so relying only
+    # on instrument_type would silently lose the ETF lane.
+    return bool(_looks_like_etf_row(r))
 
 
 def _etf_symbols()->List[str]:
-    metas=[]
+    out=[];seen=set()
     for r in instrument_rows():
-        if r.get('exchange')=='NSE' and r.get('segment')=='CASH' and _is_etf(r): metas.append(r)
-    return [str(r.get('trading_symbol')).upper() for r in metas if r.get('trading_symbol')]
+        if str(r.get('exchange') or '').upper()!='NSE':continue
+        if str(r.get('segment') or '').upper()!='CASH':continue
+        if not _is_etf(r):continue
+        sym=str(r.get('trading_symbol') or '').strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym);out.append(sym)
+    return out
 
 
 def warm_etf_history(max_symbols:int=None)->Dict[str,Any]:
+    """Independently hydrate the ETF book through the shared Groww history pacer.
+
+    ETF symbols are deliberately excluded from the stock universe, so the stock daily
+    history workers cannot populate their caches. This dedicated rotating producer is
+    therefore required for ETF research to ever become history-ready.
+    """
     syms=_etf_symbols()
-    if not syms:return {'attempted':0,'ready':0,'cursor':0}
+    if not syms:
+        out={'attempted':0,'planned':0,'ready':0,'cached_ready_total':0,'cursor':0,'universe':0,
+             'deferred_rate_limit':0,'status':'NO_ETF_INSTRUMENTS','policy':'DEDICATED_ETF_BACKGROUND_HISTORY_V6815','at':now_iso()}
+        set_state('last_etf_history_warm',out);return out
     n=int(max_symbols if max_symbols is not None else load_settings().get('etf_history_warm_batch',6))
-    n=max(0,min(n,len(syms)));cursor=int(get_state('etf_history_warm_cursor',0) or 0)%len(syms)
+    n=max(1,min(n,len(syms)));cursor=int(get_state('etf_history_warm_cursor',0) or 0)%len(syms)
     chosen=[syms[(cursor+i)%len(syms)] for i in range(n)]
-    ready=0
-    for sym in chosen:
-        if len(history(sym,'1day'))>=30:ready+=1
-    set_state('etf_history_warm_cursor',(cursor+len(chosen))%len(syms))
-    out={'attempted':len(chosen),'ready':ready,'cursor':cursor,'universe':len(syms),'policy':'LOW_PRIORITY_ROTATING_BACKGROUND_WARMUP','at':now_iso()}
+    ready=0;attempted=0;deferred=0
+    for idx,sym in enumerate(chosen):
+        raw=_load_raw_candles(_history_path(sym,'1day'))
+        if len(raw)>=30:
+            ready+=1
+            continue
+        permit=background_request_allowed()
+        if not permit.get('allowed'):
+            deferred=len(chosen)-idx
+            break
+        attempted+=1
+        if len(history(sym,'1day',allow_network=True,background=True))>=30:ready+=1
+    next_cursor=(cursor+len(chosen))%len(syms)
+    set_state('etf_history_warm_cursor',next_cursor)
+    cached_ready_total=sum(1 for sym in syms if len(_load_raw_candles(_history_path(sym,'1day')))>=30)
+    out={'attempted':attempted,'planned':len(chosen),'ready':ready,'cached_ready_total':cached_ready_total,
+         'cursor':cursor,'next_cursor':next_cursor,'universe':len(syms),'deferred_rate_limit':deferred,
+         'status':'READY' if cached_ready_total>=len(syms) else 'WARMING',
+         'policy':'DEDICATED_ETF_BACKGROUND_HISTORY_V6815','at':now_iso()}
     set_state('last_etf_history_warm',out);return out
 
 
 def scan_etfs(sides: Optional[tuple]=None, target_now: Optional[datetime]=None)->List[Dict[str,Any]]:
     started=time.monotonic();all_syms=_etf_symbols();syms=[s for s in all_syms if _history_path(s,'1day').exists()]
     prices=live_prices(syms,allow_network=False,max_age_seconds=180);regime_state=get_state('last_regime',{}) or {'regime':'WARMING','trend_vote':0,'breadth_up_pct':0,'breadth_down_pct':0,'stale':True};regime=(regime_state.get('regime') or 'WARMING');g=get_state('global_context',{}) or {'risk_state':'UNKNOWN','moves_pct':{},'stale':True};out=[]
-    stats={'book':'ETF','started_at':now_iso(),'universe_total':len(all_syms),'universe':len(syms),'history_path_missing':max(0,len(all_syms)-len(syms)),
+    stats={'book':'ETF','started_at':now_iso(),'running':True,'stage':'SCORING','universe_total':len(all_syms),'universe':len(syms),
+           'processed':0,'history_path_missing':max(0,len(all_syms)-len(syms)),
            'history_ready':0,'history_short_reject':0,'price_reject':0,'score_reject':0,'capacity_prefilter_reject':0,
-           'intelligence_reject':0,'final_target_reject':0,'eligible':0,'near_misses':[],
+           'intelligence_reject':0,'final_target_reject':0,'raw_eligible':0,'publication_ready':0,'eligible':0,'near_misses':[],
            'universe_policy':'ALL_CACHED_ETFS_NO_GATE_RELAXATION'}
     scan_sides=tuple(sides or ('LONG','SHORT'));meta_rows=[r for r in instrument_rows() if str(r.get('trading_symbol') or '').upper() in set(syms)]
     ctx=fabric_prime_symbol_context(syms,book='ETF',meta_rows=[{'symbol':r.get('trading_symbol'),'industry':r.get('industry'),'sector':r.get('sector')} for r in meta_rows])
     def near(sym,stage,detail=None,score=None):
         stats['near_misses'].append({'symbol':sym,'stage':stage,'detail':detail,'score':round(float(score),2) if score is not None else None});stats['near_misses']=stats['near_misses'][-12:]
-    for s in syms:
+    for idx,s in enumerate(syms,1):
+        stats['processed']=idx
         df=history(s,'1day',allow_network=False)
         if len(df)<30:stats['history_short_reject']+=1;near(s,'HISTORY',f'rows={len(df)}');continue
         stats['history_ready']+=1;f=latest_features(df);f['higher_tf_trend']=f.get('trend',0);px=float(prices.get(s) or f.get('close') or 0);f['close']=px
@@ -106,10 +139,22 @@ def scan_etfs(sides: Optional[tuple]=None, target_now: Optional[datetime]=None)-
             portfolio=recommendation_cluster(s,side);shared_ctx=fabric_symbol_context(s,book='ETF',side=side,features=f,fundamentals={},primed=ctx)
             ti=evaluate_trade_intelligence(book='ETF',symbol=s,side=side,features=f,fundamentals={},regime_state=regime_state,candle_info=candles,news=shared_ctx['news'],global_ctx=g,portfolio=portfolio,sector_ctx=shared_ctx['sector'],event_ctx=shared_ctx['events'],institutional_ctx=shared_ctx['institutional'],target_pct=5.0,stop_pct=max(.7,min(4,float(f.get('atr_pct') or 1.5))),strategy_ids=['ETF_TREND','ETF_MOMENTUM','ETF_VOLUME'],data_confidence=data_conf)
             if ti['decision']!='ELIGIBLE':stats['intelligence_reject']+=1;near(s,'INTELLIGENCE','; '.join((ti.get('hard_blockers') or [])[:3]),score);continue
+            stats['raw_eligible']+=1
             final=.72*min(100,score)+.28*ti['score'];tf=_target_feasibility('ETF',side,f,final,min(1,.45+(score-68)/50),data_conf,None,now=target_now)
             if not tf['target_qualified']:stats['final_target_reject']+=1;near(s,'FINAL_TARGET',';'.join(tf.get('rejection_reasons') or []),final);continue
-            stats['eligible']+=1;out.append({'symbol':s,'side':side,'score':final,'confidence':min(1,.45+(score-68)/50),'price':px,'features':f,'regime':regime,'strategies':['ETF_TREND','ETF_MOMENTUM','ETF_VOLUME'],'target_feasibility':tf,'rationale':{'reasons':['ETF trend alignment','20-session momentum','volume/liquidity confirmation'],'data_confidence':data_conf,'candlestick_context':candles,'trade_intelligence':ti,'target_feasibility':tf,'global_context':g,'portfolio_fit':portfolio,'institutional_context':shared_ctx['institutional'],'evidence_fabric_policy':shared_ctx['fabric_policy']}})
-    out.sort(key=lambda x:x['score'],reverse=True);stats['funnel']={k:stats[k] for k in ('universe_total','history_path_missing','history_ready','history_short_reject','price_reject','score_reject','capacity_prefilter_reject','intelligence_reject','final_target_reject','eligible')};stats.update({'candidates':len(out),'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)});set_state('scan_detail_ETF',stats);return out
+            stats['publication_ready']+=1;stats['eligible']+=1;out.append({'symbol':s,'side':side,'score':final,'confidence':min(1,.45+(score-68)/50),'price':px,'features':f,'regime':regime,'strategies':['ETF_TREND','ETF_MOMENTUM','ETF_VOLUME'],'target_feasibility':tf,'rationale':{'reasons':['ETF trend alignment','20-session momentum','volume/liquidity confirmation'],'data_confidence':data_conf,'candlestick_context':candles,'trade_intelligence':ti,'target_feasibility':tf,'global_context':g,'portfolio_fit':portfolio,'institutional_context':shared_ctx['institutional'],'evidence_fabric_policy':shared_ctx['fabric_policy']}})
+    out.sort(key=lambda x:x['score'],reverse=True)
+    stats['funnel']={
+        'universe_total':stats['universe_total'],'scan_scope_total':stats['universe'],
+        'scan_scope_processed':stats['processed'],'history_ready':stats['history_ready'],
+        'history_reject':stats['history_path_missing']+stats['history_short_reject'],
+        'score_reject':stats['score_reject'],'capacity_prefilter_reject':stats['capacity_prefilter_reject'],
+        'trade_intelligence_reject':stats['intelligence_reject'],'final_target_reject':stats['final_target_reject'],
+        'raw_eligible':stats['raw_eligible'],'publication_ready':stats['publication_ready'],'published':0,
+    }
+    stats.update({'running':False,'stage':'DONE','candidates':len(out),'output_candidates':len(out),
+                  'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)})
+    set_state('scan_detail_ETF',stats);return out
 
 
 def _etf_missed_freeze_recovery_allowed(now: datetime, existing: int, required: int, preperiod: bool) -> bool:
@@ -173,16 +218,22 @@ def run_etf_cycle():
         published+=_publish_frozen('ETF',1,required,publication_anchor=completion,period_key_override=pk,
             allow_preperiod=preperiod,allow_recovery=missed_freeze_recovery)
     total=_freeze_contract_count('ETF',pk)
-    contract={'required':required,'published_total':total,'shortage':max(0,required-total),'recovery_required':total<required,
-              'reason':None if total>=required else ('NO_DATA_VALID_CANDIDATES' if not c else 'FEWER_THAN_FIVE_TARGET_QUALIFIED_CANDIDATES'),
-              'cached_first':True,'no_gate_relaxation':True,'missed_freeze_recovery':missed_freeze_recovery}
-    status='CONTRACT_FULFILLED' if total>=required else (
-        'FREEZE_SHORTAGE_RECOVERY_REQUIRED' if publication_at_completion else 'PREPARED_WAITING_FOR_FREEZE'
-    )
     detail=get_state('scan_detail_ETF',{}) or {}
+    history_warming=bool(int(detail.get('universe_total') or 0)>0 and int(detail.get('history_ready') or 0)<=0
+                         and int(detail.get('history_path_missing') or 0)>=int(detail.get('universe_total') or 0))
+    reason=None if total>=required else ('ETF_HISTORY_WARMING' if history_warming else ('NO_DATA_VALID_CANDIDATES' if not c else 'FEWER_THAN_FIVE_TARGET_QUALIFIED_CANDIDATES'))
+    contract={'required':required,'published_total':total,'shortage':max(0,required-total),'recovery_required':total<required,
+              'reason':reason,'cached_first':True,'no_gate_relaxation':True,'missed_freeze_recovery':missed_freeze_recovery}
+    status='CONTRACT_FULFILLED' if total>=required else (
+        'ETF_HISTORY_WARMING' if history_warming else ('FREEZE_SHORTAGE_RECOVERY_REQUIRED' if publication_at_completion else 'PREPARED_WAITING_FOR_FREEZE')
+    )
+    if isinstance(detail.get('funnel'),dict):
+        detail['funnel']['published']=int(published or 0)
+        detail['published']=int(published or 0)
+        set_state('scan_detail_ETF',detail)
     set_state('scan_status_ETF',{'book':'ETF','running':False,'status':status,'period_key':pk,'candidates':len(c),'published':published,
         'freeze':_horizon_freeze_window('ETF',datetime.now(IST)),'contract':contract,'target_period':ctx,
-        'scan_detail_summary':{k:detail.get(k) for k in ('universe','history_ready','capacity_prefilter_reject','intelligence_reject','eligible','duration_seconds')},
+        'scan_detail_summary':{k:detail.get(k) for k in ('universe_total','universe','processed','history_path_missing','history_ready','raw_eligible','publication_ready','capacity_prefilter_reject','intelligence_reject','eligible','duration_seconds')},
         'completed_at':now_iso(),'duration_seconds':round(time.monotonic()-started,2)})
     return published
 
