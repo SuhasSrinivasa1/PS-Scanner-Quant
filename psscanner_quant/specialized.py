@@ -447,19 +447,36 @@ def run_circuit_cycle(max_symbols:int=120):
 
 
 def run_circuit_nextday_cycle()->int:
-    now=datetime.now(IST);t=now.time().replace(tzinfo=None);settings=load_settings();target=next_trading_day(now.date()).isoformat();stats={'book':'CIRCUIT_NEXTDAY','at':now_iso(),'target_session':target,'freeze_time_ist':'15:00','published':0,'calibration':_circuit_calibration()}
+    now=datetime.now(IST);t=now.time().replace(tzinfo=None);settings=load_settings();target=next_trading_day(now.date()).isoformat();required=5
+    # Read the persisted target-session slate before any time-window no-op can replace
+    # truthful publication telemetry with a synthetic zero.
+    with db() as con:
+        existing=int(con.execute(
+            "SELECT COUNT(*) FROM recommendations WHERE book='CIRCUIT_NEXTDAY' AND period_key=? AND COALESCE(result,'')<>'VOID'",
+            (target,),
+        ).fetchone()[0] or 0)
+    stats={'book':'CIRCUIT_NEXTDAY','at':now_iso(),'target_session':target,'freeze_time_ist':'15:00',
+           'published':existing,'required':required,'shortage':max(0,required-existing),
+           'recovery_required':existing<required,'calibration':_circuit_calibration()}
+    if existing:
+        stats['status']='ALREADY_FROZEN'
+        stats['publication_source']='PERSISTED_RECOMMENDATIONS'
+        if t<CIRCUIT_NEXTDAY_FREEZE:stats['window_status']='PREPARING_3PM_FREEZE'
+        elif t>MARKET_CLOSE:stats['window_status']='FREEZE_WINDOW_CLOSED'
+        else:stats['window_status']='FREEZE_WINDOW_OPEN'
+        set_state('scan_status_CIRCUIT_NEXTDAY',stats);return 0
     if not is_regular_trading_day(now.date()):stats['status']='SOURCE_MARKET_CLOSED';set_state('scan_status_CIRCUIT_NEXTDAY',stats);return 0
     if t<CIRCUIT_NEXTDAY_FREEZE:stats['status']='PREPARING_3PM_FREEZE';state=get_state('circuit_nextday_candidates',{}) or {};stats['prepared_candidates']=len(state.get('candidates') or {});set_state('scan_status_CIRCUIT_NEXTDAY',stats);return 0
     if t>MARKET_CLOSE:stats['status']='FREEZE_WINDOW_CLOSED';set_state('scan_status_CIRCUIT_NEXTDAY',stats);return 0
-    with db() as con:
-        if con.execute("SELECT COUNT(*) FROM recommendations WHERE book='CIRCUIT_NEXTDAY' AND period_key=?",(target,)).fetchone()[0]:stats['status']='ALREADY_FROZEN';set_state('scan_status_CIRCUIT_NEXTDAY',stats);return 0
     state=get_state('circuit_nextday_candidates',{}) or {};cands=list((state.get('candidates') or {}).values()) if state.get('source_session')==now.date().isoformat() else []
     cands=sorted(cands,key=lambda x:float(x.get('score') or 0),reverse=True);limit=max(1,min(8,int(settings.get('circuit_nextday_max_longs',5))))
     made=0
     for c in cands[:limit]:
         f=dict(c.get('features') or {});rationale={'reasons':['3PM frozen next-session upper-circuit propensity','daily trend/momentum','relative volume/order-book participation'],'lane':'3PM_NEXT_SESSION_LONG_ONLY','freeze_policy':'IDENTITY_ENTRY_TARGET_FROZEN_AT_15_00_IST','target_session':target,'source_session':now.date().isoformat(),'projected_circuit_band_pct':c.get('circuit_band_pct'),'order_imbalance':c.get('order_imbalance'),'candlestick_context':c.get('candlestick_context'),'data_confidence':c.get('confidence'),'target_is_not_guaranteed':True,'research_calibration':_circuit_calibration()}
         _insert_rec('CIRCUIT_NEXTDAY',c['symbol'],'LONG',float(c['score']),float(c['confidence']),float(c['price']),f,'NEXT_SESSION_CIRCUIT',['NEXTDAY_CIRCUIT_PROPENSITY','DAILY_TREND','PARTICIPATION'],rationale,exchange='NSE',target_pct_override=float(c.get('projected_target_pct') or 5),stop_pct_override=float(c.get('stop_pct') or 1.5),period_key_override=target);made+=1
-    stats.update({'status':'FROZEN' if made>=5 else 'FREEZE_SHORTAGE','published':made,'required':5,'shortage':max(0,5-made),'recovery_required':made<5,'prepared_candidates':len(cands),'frozen_at':now_iso()});set_state('scan_status_CIRCUIT_NEXTDAY',stats);return made
+    stats.update({'status':'FROZEN' if made>=required else 'FREEZE_SHORTAGE','published':made,'required':required,
+                  'shortage':max(0,required-made),'recovery_required':made<required,'prepared_candidates':len(cands),
+                  'publication_source':'THIS_CYCLE','frozen_at':now_iso()});set_state('scan_status_CIRCUIT_NEXTDAY',stats);return made
 
 
 def _us_session(now:Optional[datetime]=None)->Dict[str,Any]:
