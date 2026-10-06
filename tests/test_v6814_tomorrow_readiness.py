@@ -142,14 +142,33 @@ class V6814TomorrowReadinessTests(unittest.TestCase):
         finally:
             dbmod.DB_PATH=old_db
 
+    def _assert_release_identity_contract(self, root: Path):
+        main=(root/"psscanner_quant/main.py").read_text()
+        self.assertIn('"build_commit":build_commit()',main)
+        self.assertIn('"static_ip_policy":"EXECUTION_ONLY"',main)
+        workflow=root/".github/workflows/ci.yml"
+        if workflow.exists():
+            self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$STAGE/BUILD_COMMIT"',workflow.read_text())
+        else:
+            # Installable packages intentionally omit .github. In that environment the
+            # embedded BUILD_COMMIT is the provenance contract the runtime actually uses.
+            packaged_commit=(root/"BUILD_COMMIT")
+            self.assertTrue(packaged_commit.exists(),"packaged build must embed BUILD_COMMIT when .github is omitted")
+            self.assertRegex(packaged_commit.read_text().strip(),r"^[0-9a-f]{40}$")
+
     def test_release_identity_and_static_ip_scope(self):
         from psscanner_quant.constants import VERSION
         self.assertEqual(VERSION,"6.8.14")
-        main=(Path(__file__).resolve().parents[1]/"psscanner_quant/main.py").read_text()
-        workflow=(Path(__file__).resolve().parents[1]/".github/workflows/ci.yml").read_text()
-        self.assertIn('"build_commit":build_commit()',main)
-        self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$STAGE/BUILD_COMMIT"',workflow)
-        self.assertIn('"static_ip_policy":"EXECUTION_ONLY"',main)
+        self._assert_release_identity_contract(Path(__file__).resolve().parents[1])
+
+    def test_release_identity_contract_survives_packaging_without_github(self):
+        root=Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as td:
+            packaged=Path(td)
+            (packaged/"psscanner_quant").mkdir()
+            (packaged/"psscanner_quant/main.py").write_text((root/"psscanner_quant/main.py").read_text())
+            (packaged/"BUILD_COMMIT").write_text("5ba74f0ddc550b97956bd5bbdde9baaa2a4a4335\n")
+            self._assert_release_identity_contract(packaged)
 
     def test_external_baseline_api_is_local_only_and_explicit(self):
         main=(Path(__file__).resolve().parents[1]/"psscanner_quant/main.py").read_text()
