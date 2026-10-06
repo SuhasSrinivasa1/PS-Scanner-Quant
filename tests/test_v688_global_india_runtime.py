@@ -9,7 +9,7 @@ from psscanner_quant.constants import VERSION
 
 class V688GlobalIndiaRuntimeTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.14")
+        self.assertEqual(VERSION, "6.8.15")
 
     def test_summary_features_match_close_only_fields(self):
         closes=[100.0+i for i in range(60)]
