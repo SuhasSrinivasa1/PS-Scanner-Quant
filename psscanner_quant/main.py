@@ -76,6 +76,15 @@ def _shutdown():engine.stop()
 @app.get("/")
 def index():return FileResponse(STATIC/"index.html")
 
+_BROWSER_ICON="""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect width="180" height="180" rx="36" fill="#071019"/><path d="M34 126V54h22l34 43 34-43h22v72h-24V88l-32 39-32-39v38z" fill="#5bd6ff"/></svg>"""
+
+@app.get("/favicon.ico",include_in_schema=False)
+@app.get("/apple-touch-icon.png",include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png",include_in_schema=False)
+def browser_icon():
+    return Response(content=_BROWSER_ICON,media_type="image/svg+xml",
+                    headers={"Cache-Control":"public, max-age=86400"})
+
 @app.get("/api/ping")
 def ping():
     return {"ok": True, "app": APP_NAME, "version": VERSION, "build_commit": build_commit(), "at": now_iso()}
