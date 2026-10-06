@@ -532,7 +532,10 @@ def workers():
     return {"scheduler":state.get("scheduler_v624",{}),"threads":threads,"states":{name:state.get("worker_"+name,{}) for name in threads}}
 
 @app.get("/api/scan/status")
+@app.get("/api/scans/status",include_in_schema=False)
 def scan_status():
+    # /api/scan/status is canonical. Keep the plural alias for operational scripts so
+    # a harmless diagnostics typo cannot masquerade as scanner failure.
     state=_cached_states([p+b for b in BOOKS for p in ("scan_status_","scan_detail_")])
     return {b:{"worker":state.get("scan_status_"+b,{}),"detail":state.get("scan_detail_"+b,{})} for b in BOOKS}
 
