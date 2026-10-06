@@ -1838,6 +1838,11 @@ class Engine:
             update_international_books()
         except Exception as exc:health("international_update","WARN",str(exc)[:220])
 
+    def _etf_history(self):
+        from .specialized import warm_etf_history
+        settings=load_settings()
+        warm_etf_history(int(settings.get("etf_history_warm_batch",6)))
+
     def _etf(self):
         from .specialized import run_etf_cycle
         run_etf_cycle()
@@ -1913,6 +1918,9 @@ class Engine:
             ("international",float(settings.get("international_worker_interval_seconds",120)),self._international,16),
             ("global_india",float(settings.get("global_india_worker_interval_seconds",300)),self._global_india,17),
             ("etf",float(settings.get("etf_worker_interval_seconds",600)),self._etf,18),
+            # ETFs are excluded from the stock universe by design, so they need their own
+            # paced history producer. The scanner itself remains cached-only.
+            ("etf_history",float(settings.get("etf_history_worker_interval_seconds",120)),self._etf_history,30),
             ("fundamentals",float(settings.get("fundamentals_worker_interval_seconds",60)),self._fundamentals_refresh,20),
             ("news",float(settings.get("news_worker_interval_seconds",120)),self._news_refresh,21),
             ("events",float(settings.get("event_worker_interval_seconds",300)),self._event_refresh,22),
