@@ -71,6 +71,7 @@ _DEFAULTS: Dict[str, Any] = {
     "live_update_interval_seconds": 60,
     "maintenance_worker_interval_seconds": 90,
     "etf_worker_interval_seconds": 600,
+    "etf_history_worker_interval_seconds": 120,
     "circuit_worker_interval_seconds": 120,
     "circuit_nextday_worker_interval_seconds": 60,
     "international_worker_interval_seconds": 120,
