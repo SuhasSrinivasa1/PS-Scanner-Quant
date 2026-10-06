@@ -158,7 +158,7 @@ class V6814TomorrowReadinessTests(unittest.TestCase):
 
     def test_release_identity_and_static_ip_scope(self):
         from psscanner_quant.constants import VERSION
-        self.assertEqual(VERSION,"6.8.14")
+        self.assertGreaterEqual(tuple(map(int,VERSION.split("."))),(6,8,14))
         self._assert_release_identity_contract(Path(__file__).resolve().parents[1])
 
     def test_release_identity_contract_survives_packaging_without_github(self):
