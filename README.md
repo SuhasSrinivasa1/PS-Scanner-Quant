@@ -1,3 +1,9 @@
+# PS Scanner Quant v6.8.17
+
+v6.8.17 fixes website/runtime worker-health reporting. Daily-history hydration now publishes per-symbol progress, the command center distinguishes long-running progress from a true stall, and support-export age is visible before download. No research, risk, freeze, execution, or learning gate is weakened.
+
+See `RELEASE_v6.8.17.md`.
+
 # PS Scanner Quant v6.8.16
 
 v6.8.16 is a narrow live-runtime reliability release. It fixes the Weekly finalist-stage performance issue observed on the production Mac by reusing one scan-local portfolio-correlation history snapshot, adds finalist/Circuit progress heartbeats, and makes worker health distinguish elapsed runtime from actual lack of forward progress. No recommendation, risk, breadth, freeze, execution, or learning gate is loosened.
