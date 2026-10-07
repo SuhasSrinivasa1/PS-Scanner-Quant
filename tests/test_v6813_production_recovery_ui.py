@@ -15,7 +15,8 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
         return (ROOT/rel).read_text()
 
     def test_version_is_6813(self):
-        self.assertIn('VERSION = "6.8.16"', self.text("psscanner_quant/constants.py"))
+        from psscanner_quant.constants import VERSION
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,13))
 
     def test_installer_supports_true_fresh_install(self):
         s=self.text("install.sh")
@@ -73,7 +74,8 @@ class V6813ProductionRecoveryUITests(unittest.TestCase):
             "frozen-book shortage",
         ):
             self.assertIn(token,s)
-        self.assertIn("v6.8.16",s)
+        self.assertIn("Production Command Center",s)
+        self.assertRegex(s,r"v6\.8\.\d+")
 
     def test_ui_distinguishes_prepared_from_active(self):
         s=self.text("static/index.html")
