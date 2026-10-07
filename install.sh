@@ -17,7 +17,7 @@ MIGRATED_SECRET=0
 cleanup(){ rm -f "$TMPSECRET" "$OLD_STATUS" "$NEW_HEALTH" "$NEW_GROWW" "$PLIST_BACKUP" 2>/dev/null || true; }
 trap cleanup EXIT
 
-echo "PS Scanner Quant v6.8.15 production install / recovery / in-place upgrade"
+echo "PS Scanner Quant v6.8.16 production install / recovery / in-place upgrade"
 echo "Target: $APP"
 echo
 
