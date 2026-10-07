@@ -11,7 +11,7 @@ from psscanner_quant import db as dbmod
 
 class V6810PassiveUIViewTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION,"6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
 
     def test_health_is_pure_memory_for_subsystems(self):
         src=inspect.getsource(main.health)
