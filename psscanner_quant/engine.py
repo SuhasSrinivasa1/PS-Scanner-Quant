@@ -1673,7 +1673,7 @@ class Engine:
                     s=datetime.fromisoformat(str(started));s=s if s.tzinfo else s.replace(tzinfo=IST);elapsed=max(0.0,(now-s).total_seconds())
                 except Exception:elapsed=None
             b=worker_book.get(name);detail=scan_cache.get(f"scan_detail_{b}",{}) if b else {};scan=scan_cache.get(f"scan_status_{b}",{}) if b else {}
-            mem=_scan_progress_snapshot(b) if b else {}
+            mem=_scan_progress_snapshot(b) if b and state.get("state")=="RUNNING" else {}
             processed=mem.get("processed",detail.get("processed",scan.get("processed")))
             universe=mem.get("total",detail.get("universe",scan.get("universe")))
             remaining=max(0,int(universe)-int(processed)) if isinstance(universe,(int,float)) and isinstance(processed,(int,float)) else None
@@ -1718,7 +1718,7 @@ class Engine:
                     s=datetime.fromisoformat(str(started));s=s if s.tzinfo else s.replace(tzinfo=IST)
                     elapsed=max(0.0,(now-s).total_seconds())
                 except Exception:elapsed=None
-            mem=_scan_progress_snapshot(worker_book.get(name,""))
+            mem=_scan_progress_snapshot(worker_book.get(name,"")) if state.get("state")=="RUNNING" else {}
             last_progress=mem.get("last_progress_at");progress_age=None
             if last_progress:
                 try:
