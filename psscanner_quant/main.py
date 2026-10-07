@@ -240,6 +240,9 @@ def health():
         "runtime_fairness_patch":{"version":"6.8.10","name":"COOPERATIVE_FULL_BREADTH_AND_PASSIVE_VIEW_CACHES",
             "full_nse_first_pass":True,"top_n_universe_cap":False,"shared_summary_ttl_seconds":30,
             "passive_health_db_free":True},
+        "worker_progress_patch":{"version":"6.8.17","name":"PROGRESS_AWARE_BACKGROUND_WORKER_HEALTH",
+            "daily_history_heartbeat":True,"elapsed_runtime_separate_from_stall":True,
+            "support_bundle_age_visible":True},
         "generated_at":now_iso(),"market_open":market,"engine_alive":bool(engine.thread and engine.thread.is_alive()),"engine_last_error":engine.last_error,
         "workers":workers,"groww":snap.get("groww") or {"status":"WARMING","connected":False},
         "static_ip":snap.get("static_ip") or {"state":"UNAVAILABLE","matches":False,"cached":True},
@@ -280,10 +283,15 @@ def support_export():
     payload=latest_support_bundle_payload()
     if payload is None:
         raise HTTPException(503,"Support bundle is warming; background producer has not completed a bundle yet.")
+    status=support_bundle_status()
+    generated=str(status.get("generated_at") or "")
+    age=status.get("generated_age_seconds")
     return Response(content=payload,media_type="application/zip",
                     headers={"Cache-Control":"no-store",
                              "Content-Disposition":f'attachment; filename="PS_Scanner_Logs_{VERSION}.zip"',
-                             "X-PS-Scanner-Support-Source":"PREBUILT_MEMORY"})
+                             "X-PS-Scanner-Support-Source":"PREBUILT_MEMORY",
+                             "X-PS-Scanner-Support-Generated-At":generated,
+                             "X-PS-Scanner-Support-Age-Seconds":str(age if age is not None else "")})
 
 
 @app.get("/api/sanity")
