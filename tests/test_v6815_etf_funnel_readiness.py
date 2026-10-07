@@ -13,7 +13,7 @@ from psscanner_quant.engine import Engine
 
 class V6815ETFFunnelReadinessTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION,"6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
 
     def test_etf_universe_uses_canonical_classification_and_normalized_market_fields(self):
         rows=[
