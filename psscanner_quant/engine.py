@@ -45,18 +45,33 @@ FREEZE_CONTRACT_MIN = {"WEEKLY": 5, "MONTHLY": 5, "ETF": 5, "INTERNATIONAL": 5}
 # distinguishing a long-running worker from one that has stopped making progress.
 _SCAN_PROGRESS_MEMORY: Dict[str, Dict[str, Any]] = {}
 _SCAN_PROGRESS_LOCK = threading.RLock()
+_WORKER_PROGRESS_KEYS = {
+    "intraday":"INTRADAY","weekly":"WEEKLY","monthly":"MONTHLY","etf":"ETF",
+    "circuit":"CIRCUIT","circuit_nextday":"CIRCUIT_NEXTDAY","international":"INTERNATIONAL",
+    "daily_history":"DAILY_HISTORY",
+}
 
 
 def note_scan_progress(book: str, stage: str, *, processed: Optional[int]=None,
-                       total: Optional[int]=None, current: Optional[str]=None) -> None:
+                       total: Optional[int]=None, current: Optional[str]=None,
+                       meta: Optional[Dict[str, Any]]=None) -> None:
     payload={"book":str(book).upper(),"stage":str(stage or "RUNNING"),"last_progress_at":now_iso()}
     if processed is not None:payload["processed"]=int(processed)
     if total is not None:payload["total"]=int(total)
     if current is not None:payload["current"]=str(current)
+    if isinstance(meta,dict):
+        for key,value in meta.items():
+            if key not in {"book","stage","last_progress_at","processed","total","current"}:
+                payload[str(key)]=value
     with _SCAN_PROGRESS_LOCK:
         old=dict(_SCAN_PROGRESS_MEMORY.get(payload["book"]) or {})
         old.update(payload)
         _SCAN_PROGRESS_MEMORY[payload["book"]]=old
+
+
+def _clear_scan_progress(book: str) -> None:
+    with _SCAN_PROGRESS_LOCK:
+        _SCAN_PROGRESS_MEMORY.pop(str(book).upper(),None)
 
 
 def _scan_progress_snapshot(book: str) -> Dict[str, Any]:
@@ -1653,8 +1668,7 @@ class Engine:
         # Read scan progress in one short WAL read. Failure is fail-soft so /api/health
         # cannot hang behind many independent state lookups.
         scan_cache={}
-        worker_book={"intraday":"INTRADAY","weekly":"WEEKLY","monthly":"MONTHLY","etf":"ETF",
-                     "circuit":"CIRCUIT","circuit_nextday":"CIRCUIT_NEXTDAY","international":"INTERNATIONAL"}
+        worker_book=dict(_WORKER_PROGRESS_KEYS)
         keys=[f"scan_detail_{b}" for b in worker_book.values()]+[f"scan_status_{b}" for b in worker_book.values()]
         try:
             qs=",".join("?" for _ in keys)
@@ -1695,6 +1709,7 @@ class Engine:
                        "current_stage":mem.get("stage") or detail.get("stage") or scan.get("status") or state.get("state"),
                        "processed":processed,"remaining":remaining,
                        "current_item":mem.get("current") or detail.get("current_finalist") or detail.get("current_symbol"),
+                       "progress_detail":{k:v for k,v in mem.items() if k not in {"book","stage","last_progress_at","processed","total","current"}},
                        "rejection_counters":(detail.get("funnel") or {}),
                        "recovery_state":scan.get("contract") or scan.get("recovery_policy"),
                        "restart_count":int(self.worker_restarts.get(name,0))}
@@ -1707,8 +1722,7 @@ class Engine:
         paths must not open that second connection or wait behind worker telemetry writes.
         """
         now=datetime.now(IST);out={}
-        worker_book={"intraday":"INTRADAY","weekly":"WEEKLY","monthly":"MONTHLY","etf":"ETF",
-                     "circuit":"CIRCUIT","circuit_nextday":"CIRCUIT_NEXTDAY","international":"INTERNATIONAL"}
+        worker_book=dict(_WORKER_PROGRESS_KEYS)
         for name,t in self.workers.items():
             spec=self.worker_specs.get(name,(300,None));interval=float(spec[0]);timeout=self._worker_timeout_seconds(name,interval)
             state=dict(self.worker_runtime.get(name) or {})
@@ -1737,6 +1751,7 @@ class Engine:
                        "stall_grace_seconds":round(stall_grace,2),
                        "current_stage":mem.get("stage") or state.get("stage") or state.get("state"),
                        "processed":processed,"remaining":remaining,"current_item":mem.get("current"),
+                       "progress_detail":{k:v for k,v in mem.items() if k not in {"book","stage","last_progress_at","processed","total","current"}},
                        "rejection_counters":{},"recovery_state":None,
                        "restart_count":int(self.worker_restarts.get(name,0)),"passive_cached":True}
         return out
@@ -1746,6 +1761,8 @@ class Engine:
         while not self.stop_evt.is_set():
             started=time.monotonic();started_at=now_iso()
             previous=dict(self.worker_runtime.get(name) or {})
+            progress_key=_WORKER_PROGRESS_KEYS.get(name)
+            if progress_key:_clear_scan_progress(progress_key)
             running={"state":"RUNNING","started_at":started_at,"last_ok_at":previous.get("last_ok_at"),
                      "last_error":previous.get("last_error")}
             self.worker_runtime[name]=running
@@ -1804,7 +1821,15 @@ class Engine:
 
     def _daily_history(self):
         settings=load_settings()
-        warm_daily_history(int(settings.get("daily_history_warm_batch",20)))
+        def progress(payload):
+            payload=dict(payload or {})
+            note_scan_progress(
+                "DAILY_HISTORY",payload.get("stage") or "HISTORY_WARM",
+                processed=payload.get("processed"),total=payload.get("planned"),
+                current=payload.get("current_symbol"),
+                meta={k:payload.get(k) for k in ("ready","errors","deferred_rate_limit","universe") if k in payload},
+            )
+        warm_daily_history(int(settings.get("daily_history_warm_batch",20)),progress_callback=progress)
 
     def _benchmark_history(self):
         # Dedicated benchmark producer. Scanners consume only the cached NIFTY history,
