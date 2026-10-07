@@ -41,7 +41,8 @@ class V622ExecutionSeparationTests(unittest.TestCase):
 
     def test_ui_has_static_ip_execution_lock_but_research_active_copy(self):
         html = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
-        self.assertIn("ORDER LOCKED · STATIC IP", html)
+        self.assertIn("static_ip_not_set:'Static IP not set'", html)
+        self.assertIn("ORDER LOCKED ·", html)
         self.assertIn("Static IP does not affect research or recommendation generation", html)
         self.assertIn("Static IP gates order execution only; it never gates recommendations", html)
 
