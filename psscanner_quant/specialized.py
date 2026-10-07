@@ -19,7 +19,8 @@ from .db import db, health, get_state, set_state, now_iso
 from .broker import broker
 from .engine import (_insert_rec, _observe, _publish_frozen, period_key, _target_feasibility, _risk_geometry,
     _period_has_valid_frozen_book, _horizon_freeze_window, _freeze_contract_min, _freeze_contract_count,
-    _horizon_target_context, _append_discovery_capacity, _publish_append_discoveries, _activate_recommendation, _rec_rationale)
+    _horizon_target_context, _append_discovery_capacity, _publish_append_discoveries, _activate_recommendation, _rec_rationale,
+    note_scan_progress)
 from .regime import classify
 from .global_context import snapshot as global_snapshot
 from .trade_intelligence import evaluate as evaluate_trade_intelligence
@@ -328,6 +329,7 @@ def run_circuit_cycle(max_symbols:int=120):
            'full_nse_universe':len(pool),'exact_quote_candidates':0,'quotes_ok':0,'verified_bands':0,
            'near_band':0,'deadline_reject':0,'hard_blocked':0,'evidence_reject':0,'stale_intraday_reject':0,'execution_permission_reject':0,'inserted':0,'user_deadline_ist':'15:00',
            'watchlist_long':[],'watchlist_short':[],'universe_policy':'FULL_NSE_COARSE_SCREEN_NO_LIQUIDITY_CAP'}
+    note_scan_progress('CIRCUIT','BREADTH_SCREEN',processed=0,total=len(pool))
     set_state('scan_status_CIRCUIT',stats)
     if not is_regular_trading_day(now.date()):
         stats.update({'running':False,'status':'MARKET_CLOSED','completed_at':now_iso(),'duration_seconds':0});set_state('scan_status_CIRCUIT',stats);return 0
@@ -341,6 +343,8 @@ def run_circuit_cycle(max_symbols:int=120):
     exact=[]
     for idx,sym in enumerate(pool,1):
         stats['breadth_screened']=idx
+        if idx==1 or idx%100==0 or idx==len(pool):
+            note_scan_progress('CIRCUIT','BREADTH_SCREEN',processed=idx,total=len(pool),current=sym)
         px=float(prices.get(sym) or 0)
         raw=_load_raw_candles(_history_path(sym,'1day'));prev=None
         for row in reversed(raw):
@@ -382,6 +386,7 @@ def run_circuit_cycle(max_symbols:int=120):
     with db() as con:live_counts={side:int(con.execute("SELECT COUNT(*) FROM recommendations WHERE book='CIRCUIT' AND period_key=? AND side=? AND state='LIVE'",(pk,side)).fetchone()[0]) for side in ('LONG','SHORT')}
     for idx,s in enumerate(exact,1):
         stats['processed']=idx;stats['current_symbol']=s;stats['elapsed_seconds']=round(time.monotonic()-started,2)
+        note_scan_progress('CIRCUIT','EXACT_QUOTE_VERIFICATION',processed=idx,total=len(exact),current=s)
         if idx==1 or idx%10==0:set_state('scan_status_CIRCUIT',stats)
         try:q=broker.quote(s)
         except Exception:continue

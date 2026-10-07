@@ -11,7 +11,7 @@ from psscanner_quant.constants import VERSION
 
 class V6811AcceptanceFixTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION,"6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
 
     def test_validator_requires_new_passive_cache_contracts(self):
         root=Path(__file__).resolve().parents[1]

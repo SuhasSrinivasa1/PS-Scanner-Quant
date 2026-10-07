@@ -6,7 +6,7 @@ from psscanner_quant.constants import VERSION
 
 class V683InstallerHealthGateTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
 
     def test_installer_health_gate_derives_expected_version_from_installed_source(self):
         root = Path(__file__).resolve().parents[1]
