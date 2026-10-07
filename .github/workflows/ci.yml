@@ -87,6 +87,7 @@ jobs:
           zsh -n run.sh
           zsh -n tools/local_release_validate.sh
           bash -n tools/apply_v6817_website_fix.sh
+          bash -n tools/apply_v6818_website_correctness.sh
       - name: Secret leakage scan
         run: python tools/check_no_secrets.py
       - name: Dependency consistency
@@ -134,6 +135,7 @@ jobs:
           zsh -n run.sh
           zsh -n tools/local_release_validate.sh
           bash -n tools/apply_v6817_website_fix.sh
+          bash -n tools/apply_v6818_website_correctness.sh
       - name: Secret leakage scan
         run: python tools/check_no_secrets.py
       - name: Dependency consistency
