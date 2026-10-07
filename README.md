@@ -1,3 +1,9 @@
+# PS Scanner Quant v6.8.16
+
+v6.8.16 is a narrow live-runtime reliability release. It fixes the Weekly finalist-stage performance issue observed on the production Mac by reusing one scan-local portfolio-correlation history snapshot, adds finalist/Circuit progress heartbeats, and makes worker health distinguish elapsed runtime from actual lack of forward progress. No recommendation, risk, breadth, freeze, execution, or learning gate is loosened.
+
+See `RELEASE_v6.8.16.md`.
+
 # PS Scanner Quant v6.8.12
 
 v6.8.12 is the current release candidate. It is a narrow runtime-completion release based on the real-Mac v6.8.11 acceptance run.
