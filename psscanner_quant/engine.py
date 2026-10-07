@@ -1069,6 +1069,7 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
     for finalist_idx,c in enumerate(finalists,1):
         stats["finalists_processed"]=finalist_idx;stats["current_finalist"]=c["symbol"]
         progress(c["symbol"],force=(finalist_idx==1 or finalist_idx==len(finalists) or finalist_idx%5==0))
+        note_scan_progress(book,"FINALIST_REFRESH",processed=finalist_idx,total=len(finalists),current=c["symbol"])
         if c['symbol'] in fresh:
             c['price']=float(fresh[c['symbol']]);c['features']['close']=c['price']
         shared_ctx=fabric_symbol_context(c['symbol'],book=book,side=c['side'],features=c['features'],fundamentals=c.get('fundamentals') or {},primed=scan_ctx)
