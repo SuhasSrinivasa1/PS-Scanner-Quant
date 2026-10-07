@@ -1108,7 +1108,7 @@ def _fast_raw_history_coverage(symbols: Iterable[str], interval: str="1day", min
             "mode":"FAST_RAW_CACHE_READINESS","at":now_iso()}
 
 
-def warm_daily_history(max_symbols: int=24) -> Dict[str,Any]:
+def warm_daily_history(max_symbols: int=24, progress_callback=None) -> Dict[str,Any]:
     """Populate daily history with bounded rotating cache inspection.
 
     The full NSE universe is preserved. A bounded slice rotates through every symbol,
@@ -1141,16 +1141,30 @@ def warm_daily_history(max_symbols: int=24) -> Dict[str,Any]:
         if sym not in chosen:chosen.append(sym)
         if len(chosen)>=n:break
     ready=0;errors=0;attempted=0;deferred_rate_limit=0
+    def emit(stage,processed=0,current_symbol=None):
+        if not callable(progress_callback):return
+        try:
+            progress_callback({
+                "stage":str(stage),"processed":int(processed),"planned":len(chosen),
+                "current_symbol":current_symbol,"ready":ready,"errors":errors,
+                "deferred_rate_limit":deferred_rate_limit,"universe":len(syms),
+            })
+        except Exception:
+            pass
+    emit("PREPARE",0,None)
     for idx,sym in enumerate(chosen):
         permit=background_request_allowed()
         if not permit.get("allowed"):
             deferred_rate_limit=len(chosen)-idx
+            emit("RATE_LIMIT_DEFERRED",idx,sym)
             break
         attempted+=1
+        emit("FETCHING",idx,sym)
         try:
             if len(history(sym,"1day",allow_network=True,background=True))>=30:ready+=1
             else:errors+=1
         except Exception:errors+=1
+        emit("WARMING",idx+1,sym)
     set_state("daily_history_warm_cursor",(cursor+rotate_count)%len(syms))
     breadth=get_state("full_breadth_discovery",{}) or {}
     if int(breadth.get("universe") or 0)==len(syms) and breadth.get("status")=="CURRENT":
@@ -1165,7 +1179,7 @@ def warm_daily_history(max_symbols: int=24) -> Dict[str,Any]:
          "priority_pool":len(pool),"missing_in_priority_pool":len(missing),"priority_active":len(active),
          "priority_new":len(newly),"priority_industry_anchors":len(anchor_need),"at":now_iso(),
          "policy":"FULL_NSE_DAILY_BOUNDED_ROTATION_ACTIVE_NEW_NO_FULL_CACHE_REPARSE"}
-    set_state("daily_history_warm_status",out);return out
+    set_state("daily_history_warm_status",out);emit("COMPLETE",attempted,chosen[attempted-1] if attempted else None);return out
 
 
 def international_history(symbol: str, period: str="1y", interval: str="1d") -> pd.DataFrame:
