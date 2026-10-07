@@ -1,8 +1,8 @@
-# PS Scanner Quant v6.8.17
+# PS Scanner Quant v6.8.18
 
-v6.8.17 fixes website/runtime worker-health reporting. Daily-history hydration now publishes per-symbol progress, the command center distinguishes long-running progress from a true stall, and support-export age is visible before download. No research, risk, freeze, execution, or learning gate is weakened.
+v6.8.18 completes the website-correctness pass: research health, worker health, broker state, Static-IP state and execution readiness are rendered as separate truth domains. Startup unknown/probing states are amber instead of false failures, genuine execution locks remain red, and the command center no longer conflates recovery or execution state with research-engine failure.
 
-See `RELEASE_v6.8.17.md`.
+See `RELEASE_v6.8.18.md`.
 
 # PS Scanner Quant v6.8.16
 
