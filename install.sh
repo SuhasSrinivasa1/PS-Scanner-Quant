@@ -382,7 +382,7 @@ PYH
   sleep 2
 done
 if [[ $ok -ne 1 ]]; then
-  echo "v6.8.15 service did not pass application health check. See $APP/logs/service-error.log" >&2
+  echo "v6.8.16 service did not pass application health check. See $APP/logs/service-error.log" >&2
   exit 20
 fi
 
@@ -418,7 +418,7 @@ if [[ $groww_ok -ne 1 ]]; then
     echo "Research/data workers will initialize; manual execution remains fail-closed."
     echo "Run $APP/CONFIGURE_GROWW.command after installation."
   else
-    echo "v6.8.15 application started, but Groww connectivity could not be verified after explicit probes." >&2
+    echo "v6.8.16 application started, but Groww connectivity could not be verified after explicit probes." >&2
     if [[ $groww_auth_required -gt 0 ]]; then
       echo "Groww returned AUTH_REQUIRED during verification." >&2
     else
@@ -453,7 +453,7 @@ trap cleanup EXIT
 
 echo
 echo "============================================================"
-echo "PS Scanner Quant v6.8.15 INSTALLED"
+echo "PS Scanner Quant v6.8.16 INSTALLED"
 echo "UI: http://127.0.0.1:8765"
 if [[ $groww_ok -eq 1 ]]; then
   echo "Groww authentication: VERIFIED"
