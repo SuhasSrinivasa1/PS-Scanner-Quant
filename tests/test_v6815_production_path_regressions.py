@@ -13,7 +13,7 @@ from psscanner_quant.constants import IST, VERSION
 
 class V6815ProductionPathRegressions(unittest.TestCase):
     def test_cached_etf_resolves_through_production_history_lookup_and_becomes_ready(self):
-        self.assertEqual(VERSION,"6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
         old_cache=data._CACHE
         captured={}
         try:
