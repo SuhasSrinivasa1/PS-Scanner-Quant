@@ -20,7 +20,7 @@ from .features import latest_features
 from .candle_patterns import detect_patterns
 from .global_context import snapshot as global_snapshot
 from .news_context import context as news_context
-from .portfolio_risk import recommendation_cluster
+from .portfolio_risk import recommendation_cluster, prepare_recommendation_cluster
 from .trade_intelligence import evaluate as evaluate_trade_intelligence
 from .fundamentals import get as fundamentals_get, quality_score
 from .regime import classify
@@ -39,6 +39,29 @@ from .production_integrity import (
 
 HORIZON_EXECUTABLE_SIDES = {"WEEKLY": ("LONG",), "MONTHLY": ("LONG",), "ETF": ("LONG",)}
 FREEZE_CONTRACT_MIN = {"WEEKLY": 5, "MONTHLY": 5, "ETF": 5, "INTERNATIONAL": 5}
+
+# In-memory scan heartbeat used by the passive health endpoint.  It deliberately
+# avoids SQLite so /api/health remains a pure-memory request path while still
+# distinguishing a long-running worker from one that has stopped making progress.
+_SCAN_PROGRESS_MEMORY: Dict[str, Dict[str, Any]] = {}
+_SCAN_PROGRESS_LOCK = threading.RLock()
+
+
+def note_scan_progress(book: str, stage: str, *, processed: Optional[int]=None,
+                       total: Optional[int]=None, current: Optional[str]=None) -> None:
+    payload={"book":str(book).upper(),"stage":str(stage or "RUNNING"),"last_progress_at":now_iso()}
+    if processed is not None:payload["processed"]=int(processed)
+    if total is not None:payload["total"]=int(total)
+    if current is not None:payload["current"]=str(current)
+    with _SCAN_PROGRESS_LOCK:
+        old=dict(_SCAN_PROGRESS_MEMORY.get(payload["book"]) or {})
+        old.update(payload)
+        _SCAN_PROGRESS_MEMORY[payload["book"]]=old
+
+
+def _scan_progress_snapshot(book: str) -> Dict[str, Any]:
+    with _SCAN_PROGRESS_LOCK:
+        return dict(_SCAN_PROGRESS_MEMORY.get(str(book).upper()) or {})
 
 
 def _freeze_contract_min(book: str) -> int:
@@ -888,6 +911,8 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
         stats["elapsed_seconds"]=round(time.monotonic()-started,2)
         stats["last_progress_at"]=now_iso()
         if symbol is not None:stats["current_symbol"]=symbol
+        note_scan_progress(book,stats.get("stage") or "RUNNING",processed=stats.get("processed"),
+                           total=len(syms),current=symbol or stats.get("current_symbol"))
         stats["history_coverage"].update({"ready":stats["history_ready"],"files":stats["history_ready"]+stats["history_missing"],"scanned_on_the_fly":True})
         if force or stats["processed"]<=1 or stats["processed"]%progress_step==0 or stats["processed"]==len(syms):
             set_state(f"scan_detail_{book}",stats)
@@ -1027,13 +1052,27 @@ def scan_equities(book: str = "INTRADAY", symbols_override: Optional[List[str]] 
     # performs no network request, so recommendation latency cannot be held hostage by APIs.
     stats["stage"]="FINALIST_REFRESH";progress(force=True)
     finalists=raw  # no arbitrary top-N finalist cap; every eligible candidate gets final gates
+    stats["finalists_total"]=len(finalists);stats["finalists_processed"]=0
+    # Preserve the portfolio-correlation gate, but load each unique daily return series
+    # once per side for this final pass instead of once per finalist/peer pair.
+    cluster_ctx={}
+    for side in sorted({str(c.get("side") or "").upper() for c in finalists if c.get("side")}):
+        cluster_ctx[side]=prepare_recommendation_cluster(
+            [c["symbol"] for c in finalists if str(c.get("side") or "").upper()==side],side
+        )
+    stats["portfolio_correlation_cache"]={
+        side:{"symbols_loaded":ctx.get("symbols_loaded",0),"policy":ctx.get("policy")}
+        for side,ctx in cluster_ctx.items()
+    }
     fresh=live_prices([c['symbol'] for c in finalists],allow_network=False,max_age_seconds=90) if finalists else {}
     out=[]
-    for c in finalists:
+    for finalist_idx,c in enumerate(finalists,1):
+        stats["finalists_processed"]=finalist_idx;stats["current_finalist"]=c["symbol"]
+        progress(c["symbol"],force=(finalist_idx==1 or finalist_idx==len(finalists) or finalist_idx%5==0))
         if c['symbol'] in fresh:
             c['price']=float(fresh[c['symbol']]);c['features']['close']=c['price']
         shared_ctx=fabric_symbol_context(c['symbol'],book=book,side=c['side'],features=c['features'],fundamentals=c.get('fundamentals') or {},primed=scan_ctx)
-        news=shared_ctx["news"];portfolio=recommendation_cluster(c['symbol'],c['side'])
+        news=shared_ctx["news"];portfolio=recommendation_cluster(c['symbol'],c['side'],prepared=cluster_ctx.get(str(c['side']).upper()))
         sctx=shared_ctx["sector"];ectx=shared_ctx["events"];ictx=shared_ctx["institutional"]
         ti=evaluate_trade_intelligence(book=book,symbol=c['symbol'],side=c['side'],features=c['features'],fundamentals=c.get('fundamentals') or {},regime_state=regime_state,candle_info=c.get('candlestick_context'),news=news,global_ctx=global_ctx,portfolio=portfolio,sector_ctx=sctx,event_ctx=ectx,institutional_ctx=ictx,target_pct=_risk_geometry(book,c['features'])['target_pct'],stop_pct=_risk_geometry(book,c['features'])['stop_pct'],strategy_ids=c['strategies'],data_confidence=float(c['rationale'].get('data_confidence') or 0))
         c['trade_intelligence']=ti;c['rationale']['trade_intelligence']=ti;c['rationale']['news_context']=news;c['rationale']['portfolio_fit']=portfolio;c['rationale']['sector_context']=sctx;c['rationale']['event_context']=ectx;c['rationale']['institutional_context']=ictx;c['rationale']['evidence_fabric_policy']=shared_ctx.get("fabric_policy")
@@ -1633,13 +1672,28 @@ class Engine:
                     s=datetime.fromisoformat(str(started));s=s if s.tzinfo else s.replace(tzinfo=IST);elapsed=max(0.0,(now-s).total_seconds())
                 except Exception:elapsed=None
             b=worker_book.get(name);detail=scan_cache.get(f"scan_detail_{b}",{}) if b else {};scan=scan_cache.get(f"scan_status_{b}",{}) if b else {}
-            processed=detail.get("processed",scan.get("processed"));universe=detail.get("universe",scan.get("universe"))
+            mem=_scan_progress_snapshot(b) if b else {}
+            processed=mem.get("processed",detail.get("processed",scan.get("processed")))
+            universe=mem.get("total",detail.get("universe",scan.get("universe")))
             remaining=max(0,int(universe)-int(processed)) if isinstance(universe,(int,float)) and isinstance(processed,(int,float)) else None
+            last_progress=mem.get("last_progress_at") or detail.get("last_progress_at")
+            progress_age=None
+            if last_progress:
+                try:
+                    p=datetime.fromisoformat(str(last_progress));p=p if p.tzinfo else p.replace(tzinfo=IST)
+                    progress_age=max(0.0,(now-p).total_seconds())
+                except Exception:progress_age=None
+            stall_grace=min(timeout,max(180.0,timeout*.25))
+            over=bool(t.is_alive() and state.get("state")=="RUNNING" and elapsed is not None and elapsed>timeout)
+            hung=bool(over and (progress_age is None or progress_age>stall_grace))
             out[name]={**state,"alive":bool(t.is_alive()),"thread":t.name,"timeout_seconds":timeout,
                        "elapsed_seconds":round(elapsed,2) if elapsed is not None else state.get("duration_seconds"),
-                       "hung":bool(t.is_alive() and state.get("state")=="RUNNING" and elapsed is not None and elapsed>timeout),
-                       "current_stage":detail.get("stage") or scan.get("status") or state.get("state"),
+                       "hung":hung,"runtime_over_threshold":over,
+                       "last_progress_at":last_progress,"progress_age_seconds":round(progress_age,2) if progress_age is not None else None,
+                       "stall_grace_seconds":round(stall_grace,2),
+                       "current_stage":mem.get("stage") or detail.get("stage") or scan.get("status") or state.get("state"),
                        "processed":processed,"remaining":remaining,
+                       "current_item":mem.get("current") or detail.get("current_finalist") or detail.get("current_symbol"),
                        "rejection_counters":(detail.get("funnel") or {}),
                        "recovery_state":scan.get("contract") or scan.get("recovery_policy"),
                        "restart_count":int(self.worker_restarts.get(name,0))}
@@ -1652,6 +1706,8 @@ class Engine:
         paths must not open that second connection or wait behind worker telemetry writes.
         """
         now=datetime.now(IST);out={}
+        worker_book={"intraday":"INTRADAY","weekly":"WEEKLY","monthly":"MONTHLY","etf":"ETF",
+                     "circuit":"CIRCUIT","circuit_nextday":"CIRCUIT_NEXTDAY","international":"INTERNATIONAL"}
         for name,t in self.workers.items():
             spec=self.worker_specs.get(name,(300,None));interval=float(spec[0]);timeout=self._worker_timeout_seconds(name,interval)
             state=dict(self.worker_runtime.get(name) or {})
@@ -1661,10 +1717,25 @@ class Engine:
                     s=datetime.fromisoformat(str(started));s=s if s.tzinfo else s.replace(tzinfo=IST)
                     elapsed=max(0.0,(now-s).total_seconds())
                 except Exception:elapsed=None
+            mem=_scan_progress_snapshot(worker_book.get(name,""))
+            last_progress=mem.get("last_progress_at");progress_age=None
+            if last_progress:
+                try:
+                    p=datetime.fromisoformat(str(last_progress));p=p if p.tzinfo else p.replace(tzinfo=IST)
+                    progress_age=max(0.0,(now-p).total_seconds())
+                except Exception:progress_age=None
+            stall_grace=min(timeout,max(180.0,timeout*.25))
+            over=bool(t.is_alive() and state.get("state")=="RUNNING" and elapsed is not None and elapsed>timeout)
+            hung=bool(over and (progress_age is None or progress_age>stall_grace))
+            processed=mem.get("processed");total=mem.get("total")
+            remaining=max(0,int(total)-int(processed)) if isinstance(total,(int,float)) and isinstance(processed,(int,float)) else None
             out[name]={**state,"alive":bool(t.is_alive()),"thread":t.name,"timeout_seconds":timeout,
                        "elapsed_seconds":round(elapsed,2) if elapsed is not None else state.get("duration_seconds"),
-                       "hung":bool(t.is_alive() and state.get("state")=="RUNNING" and elapsed is not None and elapsed>timeout),
-                       "current_stage":state.get("stage") or state.get("state"),"processed":None,"remaining":None,
+                       "hung":hung,"runtime_over_threshold":over,
+                       "last_progress_at":last_progress,"progress_age_seconds":round(progress_age,2) if progress_age is not None else None,
+                       "stall_grace_seconds":round(stall_grace,2),
+                       "current_stage":mem.get("stage") or state.get("stage") or state.get("state"),
+                       "processed":processed,"remaining":remaining,"current_item":mem.get("current"),
                        "rejection_counters":{},"recovery_state":None,
                        "restart_count":int(self.worker_restarts.get(name,0)),"passive_cached":True}
         return out
