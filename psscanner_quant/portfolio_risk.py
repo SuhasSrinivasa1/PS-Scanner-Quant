@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -63,7 +63,7 @@ def prepare_recommendation_cluster(symbols, side: str) -> Dict[str, Any]:
     }
 
 
-def recommendation_cluster(symbol: str, side: str, exclude_id: str='', prepared: Dict[str, Any] | None=None) -> Dict[str, Any]:
+def recommendation_cluster(symbol: str, side: str, exclude_id: str='', prepared: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
     sym=symbol.upper();side=side.upper()
     if isinstance(prepared,dict) and str(prepared.get('side') or '').upper()==side:
         rs=[dict(r) for r in (prepared.get('rows') or []) if str(r.get('symbol') or '').upper()!=sym]
