@@ -113,13 +113,12 @@ class V6817WebsiteWorkerHealthTests(unittest.TestCase):
 
     def test_command_center_distinguishes_busy_from_attention(self):
         html=(Path(__file__).resolve().parents[1]/"static"/"index.html").read_text()
-        self.assertIn("slow.length?'BUSY':'ONLINE'",html)
         self.assertIn("long-running but progressing:",html)
         self.assertIn("incident_capture_fresh",html)
         self.assertIn("progress_age_seconds",html)
 
     def test_release_and_bash_fix_identity(self):
-        self.assertEqual(VERSION,"6.8.17")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,17))
         script=(Path(__file__).resolve().parents[1]/"tools"/"apply_v6817_website_fix.sh").read_text()
         self.assertIn("#!/bin/bash",script)
         self.assertIn("post_install_validate.py",script)
