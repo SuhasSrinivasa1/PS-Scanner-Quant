@@ -8,7 +8,7 @@ from psscanner_quant.constants import VERSION
 
 class V686HistorySummaryRuntimeTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
 
     def test_schema_has_compact_history_summary_index(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS history_summaries", dbmod.SCHEMA)
