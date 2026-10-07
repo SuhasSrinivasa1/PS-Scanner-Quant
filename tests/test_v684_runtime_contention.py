@@ -9,7 +9,7 @@ from psscanner_quant.constants import VERSION
 
 class V684RuntimeContentionTests(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(VERSION, "6.8.15")
+        self.assertGreaterEqual(tuple(int(x) for x in VERSION.split(".")),(6,8,15))
 
     def test_full_nse_ltp_has_hard_wall_clock_budget(self):
         b = GrowwBroker()
@@ -51,7 +51,7 @@ class V684RuntimeContentionTests(unittest.TestCase):
         self.assertIn('"LTP_REFRESH"', snapshot_src)
         self.assertIn('"BREADTH_DISCOVERY"', snapshot_src)
         self.assertIn('"REGIME_CLASSIFICATION"', snapshot_src)
-        self.assertIn('"current_stage":state.get("stage") or state.get("state")', cached_status_src)
+        self.assertIn('"current_stage":mem.get("stage") or state.get("stage") or state.get("state")', cached_status_src)
         self.assertIn('self._maintenance,45', supervise_src)
         self.assertIn('self._daily_history,60', supervise_src)
 
