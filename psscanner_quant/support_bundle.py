@@ -245,7 +245,12 @@ def prime_support_bundle()->Dict[str,Any]:
 
 def support_bundle_status()->Dict[str,Any]:
     with _LOCK:
-        return dict(_STATUS)
+        out=dict(_STATUS)
+    age=_generated_age_seconds(out)
+    out["generated_age_seconds"]=round(age,1) if age is not None else None
+    out["incident_capture_fresh"]=bool(age is not None and age<=300.0)
+    out["incident_capture_note"]="PREBUILT_BACKGROUND_BUNDLE_MAY_LAG_LIVE_STATE"
+    return out
 
 
 def latest_support_bundle_path()->Path|None:
